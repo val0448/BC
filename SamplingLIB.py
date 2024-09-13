@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from typing import Callable
+from matplotlib.animation import FuncAnimation
 
 class Sampling:
     """
@@ -53,10 +54,12 @@ class Sampling:
     def visualize(self, samples: np.ndarray):
         """
         Visualizes the samples based on their dimensionality.
-
+        
         Parameters:
         - samples (np.ndarray): An array of samples to visualize.
-
+        - If multiple chains (from DREAM), samples should have shape (N_gen, N_chains, dimension).
+        - If single chain, samples should have shape (N_gen, dimension).
+        
         Returns:
         - None
 
@@ -64,47 +67,147 @@ class Sampling:
         - None
 
         Example usage:
-        ```
+        ``` 
         sampler = SamplingLIB()
         samples = np.random.randn(100, 2)
         sampler.visualize(samples)
         ```
 
         If the dimension of the samples is 1, a histogram of the samples is plotted.
-        If the dimension of the samples is 2, a 2D histogram and a scatter plot of the samples are plotted side by side.
+        If the dimension of the samples is 2, a 2D scatter plot of the samples is plotted.
         If the dimension of the samples is greater than 2, scatter plots of all possible pairs of dimensions are plotted.
-
-        Note: The number of plots in the figure depends on the dimensionality of the samples.
-
+        For multiple chains (DREAM), samples are plotted with different colors for each chain.
         """
-        if self.dimension == 1:
+        
+        # Check if samples come from multiple chains
+        if samples.ndim == 3:
+            N_gen, N_chains, dimension = samples.shape
+        elif samples.ndim == 2:
+            N_gen, dimension = samples.shape
+            N_chains = 1  # Single chain
+        else:
+            raise ValueError("Samples array must be 2D or 3D")
+
+        # If dimensionality is 1
+        if dimension == 1:
             plt.figure()
-            plt.hist(samples, bins=200)  # 1D histogram
+            if N_chains > 1:
+                for chain in range(N_chains):
+                    plt.hist(samples[:, chain, 0], bins=200, alpha=0.5, label=f'Chain {chain+1}')
+            else:
+                plt.hist(samples[:, 0], bins=200)  # Single chain
             plt.xlabel('u')
             plt.ylabel('Density')
+            if N_chains > 1:
+                plt.legend(loc='upper right')  # Move the legend to the top right corner
             plt.show()
-        elif self.dimension == 2:
-            fig, ax = plt.subplots(1, 2)
-            ax[0].hist2d(samples[:, 0], samples[:, 1], bins=20)  # 2D histogram
-            ax[1].plot(samples[:, 0], samples[:, 1], '.')  # scatter plot
-            for i in range(2):
-                ax[i].set_xlabel('$u_1$')
-                ax[i].set_ylabel('$u_2$')
-                ax[i].set_aspect('equal')
+
+        # If dimensionality is 2
+        elif dimension == 2:
+            fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+
+            if N_chains > 1:
+                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))  # Color for each chain
+                for chain, color in zip(range(N_chains), colors):
+                    ax[0].hist2d(samples[:, chain, 0], samples[:, chain, 1], bins=20, cmap="Blues", alpha=0.5)
+                    ax[1].plot(samples[:, chain, 0], samples[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
+            else:
+                ax[0].hist2d(samples[:, 0], samples[:, 1], bins=20)  # 2D histogram for single chain
+                ax[1].plot(samples[:, 0], samples[:, 1], '.')  # Scatter plot for single chain
+
+            ax[0].set_xlabel('$u_1$')
+            ax[0].set_ylabel('$u_2$')
+            ax[1].set_xlabel('$u_1$')
+            ax[1].set_ylabel('$u_2$')
+            if N_chains > 1:
+                ax[1].legend(loc='upper right')  # Move the legend to the top right corner
+            plt.tight_layout()
             plt.show()
+
+        # If dimensionality is greater than 2
         else:
-            num_pairs = self.dimension * (self.dimension - 1) // 2
-            fig, ax = plt.subplots(num_pairs, 1, figsize=(10, 10 * num_pairs))
+            num_pairs = dimension * (dimension - 1) // 2
+            fig, ax = plt.subplots(num_pairs, 1, figsize=(10, 5 * num_pairs))
+
             pair_index = 0
-            for i in range(self.dimension):
-                for j in range(i + 1, self.dimension):
-                    ax[pair_index].plot(samples[:, i], samples[:, j], '.')  # scatter plot
+            for i in range(dimension):
+                for j in range(i + 1, dimension):
+                    if N_chains > 1:
+                        for chain in range(N_chains):
+                            ax[pair_index].plot(samples[:, chain, i], samples[:, chain, j], '.', alpha=0.5, label=f'Chain {chain+1}')
+                    else:
+                        ax[pair_index].plot(samples[:, i], samples[:, j], '.')  # Single chain
+
                     ax[pair_index].set_xlabel(f'$u_{i+1}$')
                     ax[pair_index].set_ylabel(f'$u_{j+1}$')
                     ax[pair_index].set_aspect('equal')
+                    if N_chains > 1:
+                        ax[pair_index].legend(loc='upper right')  # Move the legend to the top right corner
                     pair_index += 1
+
             plt.tight_layout()
             plt.show()
+
+    def animate_chain_movement(self, samples: np.ndarray, chain: int = 0, subsample_rate: int = 100, interval: int = 20):
+        """
+        Creates an animation of a selected chain's movement through the sample space.
+
+        Parameters:
+        - samples (np.ndarray): Array of shape (N_gen, N_chains, dimension) from the DREAM algorithm.
+        - chain (int): Index of the chain to animate (default is 0).
+        - subsample_rate (int): Subsample the chain for faster animation (default is 100).
+        - interval (int): Time between frames in milliseconds (default is 20 ms for faster animation).
+
+        Returns:
+        - None
+
+        Raises:
+        - ValueError if the samples array is not 3D or dimension is not 2.
+        """
+        
+        # Ensure the correct shape and dimensionality
+        if samples.ndim != 3:
+            raise ValueError("Expected samples array of shape (N_gen, N_chains, dimension)")
+        
+        N_gen, N_chains, dimension = samples.shape
+
+        if dimension != 2:
+            raise ValueError("Currently only 2D sample space is supported for animation.")
+        
+        # Extract the selected chain's samples and subsample it
+        chain_samples = samples[::subsample_rate, chain, :]  # Subsample the chain
+        N_subsampled_gen = chain_samples.shape[0]  # New number of generations after subsampling
+
+        # Set up the figure and axis
+        fig, ax = plt.subplots()
+        ax.set_xlim(np.min(chain_samples[:, 0]) - 0.1, np.max(chain_samples[:, 0]) + 0.1)
+        ax.set_ylim(np.min(chain_samples[:, 1]) - 0.1, np.max(chain_samples[:, 1]) + 0.1)
+        ax.set_xlabel('$u_1$')
+        ax.set_ylabel('$u_2$')
+        ax.set_title(f'Movement of Chain {chain+1} Through Sample Space')
+
+        # Initialize the scatter plot and line plot
+        scatter, = ax.plot([], [], 'o', color='blue', markersize=5)
+        line, = ax.plot([], [], '-', color='gray', alpha=0.7)  # To track the movement
+
+        # Function to initialize the plot
+        def init():
+            scatter.set_data([], [])
+            line.set_data([], [])
+            return scatter, line
+
+        # Function to update the plot for each frame
+        def update(frame):
+            x_data = chain_samples[:frame+1, 0]
+            y_data = chain_samples[:frame+1, 1]
+            scatter.set_data(x_data[-1], y_data[-1])  # Update the current position
+            line.set_data(x_data, y_data)  # Update the trajectory
+            return scatter, line
+
+        # Create the animation dynamically based on the subsampled chain
+        ani = FuncAnimation(fig, update, frames=N_subsampled_gen, init_func=init, blit=True, interval=interval, repeat=False)
+
+        plt.show()
 
     def MH(self, 
            N: int = 10000, 
@@ -364,7 +467,8 @@ class Sampling:
               CR: float = 0.9,
               outlier_detection: bool = True,
               adapt_CR: bool = True,
-              chains: int = 10):
+              chains: int = 10,
+              history_length: int = None):
         """
         Differential Evolution Adaptive Metropolis (DREAM) algorithm.
 
@@ -387,64 +491,111 @@ class Sampling:
 
         if burnin < 0 or burnin > 1:
             raise ValueError('Burn-in period should be between 0 and 1.')
+        
+        if history_length is None:
+            history_length = min(100, max(10, N//100))
 
         burnin_index = int(burnin * N)
         samples = np.zeros((N, chains, self.dimension))
-        current = initial
-        log_posterior = np.array([self.posterior(x) for x in current])
+        current = initial.copy()
+        prob = np.array([self.posterior(x) for x in current])
+        prob_history = np.zeros((N, chains))
+        prob_history[0] = prob
         acceptance_counts = np.zeros(chains)
 
         gamma = 2.38 / np.sqrt(2 * delta * self.dimension)
         eps = 1e-6
 
         def differential_evolution_proposal(i, CR, current):
-            pairs = np.random.choice(chains, size=(delta, 2), replace=False)
-            diff = np.sum([current[p[0]] - current[p[1]] for p in pairs], axis=0)
-            z = current[i] + gamma * diff + np.random.normal(0, eps, size=self.dimension)
-            z = np.where(np.random.rand(self.dimension) < CR, z, current[i])
+            """
+            Generate a proposal using Differential Evolution (DE).
+            
+            Parameters:
+            - i (int): Index of the chain for which to generate the proposal.
+            - CR (float): Crossover probability.
+            - current (np.ndarray): Current states of all chains.
+            
+            Returns:
+            - z (np.ndarray): Proposed state.
+            """
+
+            chains = current.shape[0]
+            dimension = current.shape[1]
+
+            # Select two distinct chains randomly, ensuring they are not the current chain
+            indices = np.random.choice([j for j in range(chains) if j != i], size=2, replace=False)
+            x1, x2 = current[indices[0]], current[indices[1]]
+
+            # Compute the difference vector
+            diff = x1 - x2
+
+            # Generate the proposed point
+            z = current[i] + gamma * diff + np.random.normal(0, eps, size=dimension)
+
+            # Apply subspace sampling using the crossover probability CR
+            crossover_mask = np.random.rand(dimension) < CR
+            z = np.where(crossover_mask, z, current[i])
+
+            # Ensure that the proposal does not diverge too far
+            # Clip values or reflect within a reasonable range if necessary
+            max_bound = 1e10
+            min_bound = -1e10
+            z = np.clip(z, min_bound, max_bound)
+
             return z
 
-        def outlier_detection_step(log_posterior, current):
-            if outlier_detection:
-                log_posterior_mean = np.mean(log_posterior)
-                log_posterior_std = np.std(log_posterior)
-                outliers = np.abs(log_posterior - log_posterior_mean) > 2 * log_posterior_std
-                for i in np.where(outliers)[0]:
-                    current[i] = current[np.argmin(log_posterior)]  # Reset to the best current chain
-            return current
+        def outlier_detection_step(prob_history, prob, current, chains):
+            """
+            Detect and correct outlier chains based on the log posterior values.
+
+            Parameters:
+            - log_posterior (np.ndarray): Log posterior values of all chains.
+            - current (np.ndarray): Current states of all chains.
+
+            Returns:
+            - current (np.ndarray): Updated states of all chains.
+            """
+
+            prob_mean = np.mean(prob_history)
+            prob_std = np.std(prob_history)
+            outliers = np.abs(prob - prob_mean) > 2 * prob_std
+            for i in np.where(outliers)[0]:
+                chain = [np.argmax(prob)]  # Currently best chain
+                if np.random.rand() > prob[chain]:
+                    chain = np.random.choice([x for x in range(chains) if x != i])  # Random chain
+                current[i] = current[np.argmax(prob_mean)]
+                prob[i] = prob[np.argmax(prob_mean)]
+            return current, prob
+        
+        def adapt_crossover_probability(gen, acceptance_rates):
+            # linearly decrease CR
+            return max(0.1, 1 - gen / 10000)
 
         for gen in range(N):
             for i in range(chains):
                 z = differential_evolution_proposal(i, CR, current)
-                log_posterior_z = self.posterior(z)
+                prob_z = self.posterior(z)
 
-                # Check for numerical issues
-                if np.isnan(log_posterior_z) or np.isinf(log_posterior_z):
-                    print(f"Warning: log_posterior_z is {log_posterior_z} at generation {gen}, chain {i}")
-                    continue
-
-                alpha = min(1, np.exp(log_posterior_z - log_posterior[i]))
-
-                if np.isnan(alpha) or np.isinf(alpha):
-                    print(f"Warning: alpha is {alpha} at generation {gen}, chain {i}")
-                    alpha = 0
+                alpha = min(1, prob_z / prob[i])
 
                 if np.random.rand() < alpha:
                     current[i] = z
-                    log_posterior[i] = log_posterior_z
+                    prob[i] = prob_z
                     acceptance_counts[i] += 1
 
-            current = outlier_detection_step(log_posterior, current)
+            if outlier_detection and gen > history_length:
+                m = max(0, gen - history_length)
+                n = min(N, gen)
+                current, prob = outlier_detection_step(prob_history[m:n], prob, current, chains)
 
             if adapt_CR and gen < burnin_index:
-                CR = self.adapt_crossover_probability(gen, acceptance_counts / (gen + 1))
+                CR = adapt_crossover_probability(gen, acceptance_counts / (gen + 1))
 
+            prob_history[gen] = prob
             samples[gen] = current
 
         samples = samples[burnin_index:]  # Remove burn-in samples
         acceptance_rates = acceptance_counts / N
         return samples, acceptance_rates
 
-    def adapt_crossover_probability(self, gen, acceptance_rates):
-        # linearly decrease CR
-        return max(0.1, 1 - gen / 10000)
+    
