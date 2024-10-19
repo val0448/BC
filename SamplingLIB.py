@@ -1,8 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from typing import Callable
-from matplotlib.animation import FuncAnimation
+import matplotlib.animation as animation
+from scipy.stats import gaussian_kde, entropy
 
 class Sampling:
     """
@@ -51,170 +51,12 @@ class Sampling:
         self.posterior = posterior
         self.dimension = parametr_dimension
 
-    def visualize(self, samples: np.ndarray):
-        """
-        Visualizes the samples based on their dimensionality.
-        
-        Parameters:
-        - samples (np.ndarray): An array of samples to visualize.
-        - If multiple chains (from DREAM), samples should have shape (N_gen, N_chains, dimension).
-        - If single chain, samples should have shape (N_gen, dimension).
-        
-        Returns:
-        - None
-
-        Raises:
-        - None
-
-        Example usage:
-        ``` 
-        sampler = SamplingLIB()
-        samples = np.random.randn(100, 2)
-        sampler.visualize(samples)
-        ```
-
-        If the dimension of the samples is 1, a histogram of the samples is plotted.
-        If the dimension of the samples is 2, a 2D scatter plot of the samples is plotted.
-        If the dimension of the samples is greater than 2, scatter plots of all possible pairs of dimensions are plotted.
-        For multiple chains (DREAM), samples are plotted with different colors for each chain.
-        """
-        
-        # Check if samples come from multiple chains
-        if samples.ndim == 3:
-            N_gen, N_chains, dimension = samples.shape
-        elif samples.ndim == 2:
-            N_gen, dimension = samples.shape
-            N_chains = 1  # Single chain
-        else:
-            raise ValueError("Samples array must be 2D or 3D")
-
-        # If dimensionality is 1
-        if dimension == 1:
-            plt.figure()
-            if N_chains > 1:
-                for chain in range(N_chains):
-                    plt.hist(samples[:, chain, 0], bins=200, alpha=0.5, label=f'Chain {chain+1}')
-            else:
-                plt.hist(samples[:, 0], bins=200)  # Single chain
-            plt.xlabel('u')
-            plt.ylabel('Density')
-            if N_chains > 1:
-                plt.legend(loc='upper right')  # Move the legend to the top right corner
-            plt.show()
-
-        # If dimensionality is 2
-        elif dimension == 2:
-            fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-
-            if N_chains > 1:
-                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))  # Color for each chain
-                for chain, color in zip(range(N_chains), colors):
-                    ax[0].hist2d(samples[:, chain, 0], samples[:, chain, 1], bins=20, cmap="Blues", alpha=0.5)
-                    ax[1].plot(samples[:, chain, 0], samples[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
-            else:
-                ax[0].hist2d(samples[:, 0], samples[:, 1], bins=20)  # 2D histogram for single chain
-                ax[1].plot(samples[:, 0], samples[:, 1], '.')  # Scatter plot for single chain
-
-            ax[0].set_xlabel('$u_1$')
-            ax[0].set_ylabel('$u_2$')
-            ax[1].set_xlabel('$u_1$')
-            ax[1].set_ylabel('$u_2$')
-            if N_chains > 1:
-                ax[1].legend(loc='upper right')  # Move the legend to the top right corner
-            plt.tight_layout()
-            plt.show()
-
-        # If dimensionality is greater than 2
-        else:
-            num_pairs = dimension * (dimension - 1) // 2
-            fig, ax = plt.subplots(num_pairs, 1, figsize=(10, 5 * num_pairs))
-
-            pair_index = 0
-            for i in range(dimension):
-                for j in range(i + 1, dimension):
-                    if N_chains > 1:
-                        for chain in range(N_chains):
-                            ax[pair_index].plot(samples[:, chain, i], samples[:, chain, j], '.', alpha=0.5, label=f'Chain {chain+1}')
-                    else:
-                        ax[pair_index].plot(samples[:, i], samples[:, j], '.')  # Single chain
-
-                    ax[pair_index].set_xlabel(f'$u_{i+1}$')
-                    ax[pair_index].set_ylabel(f'$u_{j+1}$')
-                    ax[pair_index].set_aspect('equal')
-                    if N_chains > 1:
-                        ax[pair_index].legend(loc='upper right')  # Move the legend to the top right corner
-                    pair_index += 1
-
-            plt.tight_layout()
-            plt.show()
-
-    def animate_chain_movement(self, samples: np.ndarray, chain: int = 0, subsample_rate: int = 100, interval: int = 20):
-        """
-        Creates an animation of a selected chain's movement through the sample space.
-
-        Parameters:
-        - samples (np.ndarray): Array of shape (N_gen, N_chains, dimension) from the DREAM algorithm.
-        - chain (int): Index of the chain to animate (default is 0).
-        - subsample_rate (int): Subsample the chain for faster animation (default is 100).
-        - interval (int): Time between frames in milliseconds (default is 20 ms for faster animation).
-
-        Returns:
-        - None
-
-        Raises:
-        - ValueError if the samples array is not 3D or dimension is not 2.
-        """
-        
-        # Ensure the correct shape and dimensionality
-        if samples.ndim != 3:
-            raise ValueError("Expected samples array of shape (N_gen, N_chains, dimension)")
-        
-        N_gen, N_chains, dimension = samples.shape
-
-        if dimension != 2:
-            raise ValueError("Currently only 2D sample space is supported for animation.")
-        
-        # Extract the selected chain's samples and subsample it
-        chain_samples = samples[::subsample_rate, chain, :]  # Subsample the chain
-        N_subsampled_gen = chain_samples.shape[0]  # New number of generations after subsampling
-
-        # Set up the figure and axis
-        fig, ax = plt.subplots()
-        ax.set_xlim(np.min(chain_samples[:, 0]) - 0.1, np.max(chain_samples[:, 0]) + 0.1)
-        ax.set_ylim(np.min(chain_samples[:, 1]) - 0.1, np.max(chain_samples[:, 1]) + 0.1)
-        ax.set_xlabel('$u_1$')
-        ax.set_ylabel('$u_2$')
-        ax.set_title(f'Movement of Chain {chain+1} Through Sample Space')
-
-        # Initialize the scatter plot and line plot
-        scatter, = ax.plot([], [], 'o', color='blue', markersize=5)
-        line, = ax.plot([], [], '-', color='gray', alpha=0.7)  # To track the movement
-
-        # Function to initialize the plot
-        def init():
-            scatter.set_data([], [])
-            line.set_data([], [])
-            return scatter, line
-
-        # Function to update the plot for each frame
-        def update(frame):
-            x_data = chain_samples[:frame+1, 0]
-            y_data = chain_samples[:frame+1, 1]
-            scatter.set_data(x_data[-1], y_data[-1])  # Update the current position
-            line.set_data(x_data, y_data)  # Update the trajectory
-            return scatter, line
-
-        # Create the animation dynamically based on the subsampled chain
-        ani = FuncAnimation(fig, update, frames=N_subsampled_gen, init_func=init, blit=True, interval=interval, repeat=False)
-
-        plt.show()
-
     def MH(self, 
-           N: int = 10000, 
-           initial: np.ndarray = None, 
-           proposal_distribution: Callable = None, 
-           burnin: float = 0, 
-           acc_rate :bool =False):
+        N: int = 10000, 
+        initial: np.ndarray = None, 
+        proposal_distribution: Callable = None, 
+        burnin: float = 0, 
+        acc_rate :bool =False):
         """
         Random walk Metropolis-Hastings algorithm.
 
@@ -240,7 +82,7 @@ class Sampling:
             initial = np.zeros(self.dimension)
 
         if proposal_distribution is None:
-            def proposal_distribution(mu): return np.random.normal(mu, 1)
+            def proposal_distribution(mu): return np.random.normal(mu, 1.0)
 
         if burnin < 0 or burnin > 1:
             raise ValueError('Burnin period should be between 0 and 1.')
@@ -569,7 +411,7 @@ class Sampling:
         
         def adapt_crossover_probability(gen, acceptance_rates):
             # linearly decrease CR
-            return max(0.1, 1 - gen / 10000)
+            return max(0.3, 1 - gen / 10000)
 
         for gen in range(N):
             for i in range(chains):
@@ -598,4 +440,496 @@ class Sampling:
         acceptance_rates = acceptance_counts / N
         return samples, acceptance_rates
 
+    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = None, max_points: int = 100):
+        """
+        Visualizes the samples based on their dimensionality, and compares to posterior.
+
+        Parameters:
+        - visuals (list): A list containing the visuals to display (samples or posterior function).
+        - grid (tuple): Grid for posterior and histogram comparisons (default is None).
+
+        Returns:
+        - None
+        """
+
+        if visuals == []:
+            visuals = [self.posterior]
+
+        # Determine how many axes are required:
+        num_axes = sum(2 if (isinstance(visual, np.ndarray) and self.dimension < 3) else 1 for visual in visuals)
+
+        # Create subplots based on the required number of axes
+        fig, axes = plt.subplots(1, num_axes, figsize=(min(18, 6*num_axes), 6))
+
+        # If only one axis is required, make axes iterable
+        if num_axes == 1:
+            axes = [axes]
+
+        axis_iter = iter(axes)  # Create an iterator over axes
+
+        for visual in visuals:
+            if isinstance(visual, np.ndarray):
+                if grid is None:
+                    # Create grid for posterior and histogram comparisons
+                    grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points)
+                # Visualize samples in histograms and scatter plots (2 separate plots)
+                self.visualize_samples_hist(visual, grid, ax=next(axis_iter), show = False)
+                if self.dimension < 3:
+                    self.visualize_samples_scatter(visual, ax=next(axis_iter), show = False)
+            elif isinstance(visual, dict) and visual.get("is_kde"):
+                # If it's a KDE approximation
+                self.visualize_kde(visual['data'], grid, ax=next(axis_iter))
+            elif callable(visual):
+                if grid is None:
+                    print(type(ranges))
+                    # Create grid for posterior and histogram comparisons
+                    grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points)
+                # Visualize the posterior (1 plot)
+                self.visualize_posterior(visual, grid, ax=next(axis_iter), show = False)
+
+        plt.tight_layout()
+        plt.show()
+
+    def visualize_samples_hist(self, samples: np.ndarray, grid: tuple = None, ax = None, show = True):
+        """
+        Visualizes histograms for the samples based on their dimensionality.
+        
+        Parameters:
+        - samples (np.ndarray): An array of samples to visualize.
+        - grid (np.ndarray): Grid to base the histograms on (default is None).
+        - ax (matplotlib.axes.Axes): Axis to plot the histograms on (default is None).
+        
+        Returns:
+        - None
+        """
+
+        dimension = samples.shape[-1]
+
+        # Check if samples come from multiple chains
+        if samples.ndim == 3:
+            samples = samples.transpose(1, 0, 2).reshape(-1, dimension)
+        elif samples.ndim > 3:
+            raise ValueError("Samples array must be 2D or 3D")
+
+        # Create a grid if not provided
+        if grid is None:
+            grid = self.create_grid(visual=samples)
+
+        # Create an axis if not provided
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+
+        if dimension == 1:
+            # 1D histogram
+            ax.hist(samples[:, 0], bins=grid[2][0], alpha=0.5)
+            ax.set_xlabel('u')
+            ax.set_ylabel('Density')
+
+        elif dimension == 2:
+            # 2D histogram
+            ax.hist2d(samples[:, 0], samples[:, 1], bins=grid[2][:2], range=[grid[1][0], grid[1][1]])
+            ax.set_xlabel('$u_1$')
+            ax.set_ylabel('$u_2$')
+
+        else:
+            # N-dimensional Case: Use pairplots
+            for i in range(dimension):
+                for j in range(dimension):
+                    if i == j:
+                        # Diagonal: 1D histogram for individual dimensions
+                        ax[i, j].hist(samples[:, i], bins=grid[2][i], alpha=0.5)
+                        ax[i, j].set_xlabel(f'$u_{i+1}$')
+                    else:
+                        # Off-diagonal: 2D scatter or density plot
+                        ax[i, j].scatter(samples[:, i], samples[:, j], s=5, alpha=0.5)
+                        ax[i, j].set_xlabel(f'$u_{i+1}$')
+                        ax[i, j].set_ylabel(f'$u_{j+1}$')
+
+            plt.tight_layout()
+
+        if show:
+            plt.show()
+
+    def visualize_samples_scatter(self, samples: np.ndarray, ax = None, show = True):
+        """
+        Visualizes 1D or 2D scatter plots for samples.
+        
+        Parameters:
+        - samples (np.ndarray): An array of samples to visualize.
+        - ax (matplotlib.axes.Axes): Axis to plot the samples on (default is None).
+        
+        Returns:
+        - None
+        """
+
+        # Check if samples come from multiple chains
+        if samples.ndim == 3:
+            N_gen, N_chains, dimension = samples.shape
+        elif samples.ndim == 2:
+            N_gen, dimension = samples.shape
+            N_chains = 1  # Single chain
+        else:
+            raise ValueError("Samples array must be 2D or 3D")
+
+        # Create an axis if not provided
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+
+        if dimension == 1:
+            # 1D scatter plot: Plot samples against their index
+            if N_chains > 1:
+                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
+                for chain, color in zip(range(N_chains), colors):
+                    ax.plot(range(N_gen), samples[:, chain, 0], '.', color=color, label=f'Chain {chain+1}')
+            else:
+                ax.plot(range(N_gen), samples[:, 0], '.', alpha=0.5)
+            ax.set_xlabel('Sample Index')
+            ax.set_ylabel('$u_1$')
+            ax.set_title('1D Scatter Plot')
+            if N_chains > 1:
+                ax.legend(loc='upper right')
+
+        elif dimension == 2:
+            # 2D scatter plot
+            if N_chains > 1:
+                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
+                for chain, color in zip(range(N_chains), colors):
+                    ax.plot(samples[:, chain, 0], samples[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
+            else:
+                ax.plot(samples[:, 0], samples[:, 1], '.', alpha=0.5)
+            ax.set_xlabel('$u_1$')
+            ax.set_ylabel('$u_2$')
+            ax.set_title('2D Scatter Plot')
+            if N_chains > 1:
+                ax.legend(loc='upper right')
+
+        else:
+            raise ValueError("This function only handles 1D and 2D cases.")
+
+        if show:
+            plt.show()
+
+    def visualize_posterior(self, posterior: np.ndarray, grid: tuple = None, ax = None, ranges: list = None, max_points: int = 100 , show = True):
+        """
+        Visualizes the posterior distribution on a given grid.
+        
+        Parameters:
+        - posterior (np.ndarray): Evaluated posterior distribution.
+        - grid (np.ndarray): Grid used for visualizing the posterior.
+        - ax (matplotlib.axes.Axes): Axis to plot the posterior on (default is None).
+        
+        Returns:
+        - None
+        """
+
+        # Create a grid if not provided
+        if grid is None:
+            grid = self.create_grid(visual=posterior, ranges=ranges, max_points=max_points)
+
+        # Create an axis if not provided
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+
+        # Evaluate posterior on the grid
+        posterior_values = np.array([posterior(point) for point in grid[0]])
+
+        dimension = grid[0].shape[1]
+        if dimension == 1:
+            ax.plot(grid[0][:, 0], posterior_values, label='Posterior')
+            ax.set_xlabel('$u_1$')
+            ax.set_ylabel('Density')
+            ax.set_title('Posterior')
+
+        elif dimension == 2:
+            posterior_reshaped = posterior_values.reshape((grid[2][0], grid[2][1]))
+            ax.imshow(posterior_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
+                                                    grid[0][:, 1].min(), grid[0][:, 1].max()],
+                    origin='lower', aspect='auto')
+            ax.set_title('Posterior')
+
+        else:
+            # N-dimensional Case: Use pairplots
+            fig, ax = plt.subplots(dimension, dimension, figsize=(15, 15))
+            for i in range(dimension):
+                for j in range(dimension):
+                    if i == j:
+                        marginals = np.array([self.posterior([grid[0][k, i] if k == i else 0 for k in range(dimension)]) for k in range(len(grid[0]))])
+                        ax[i, j].plot(marginals)
+                    else:
+                        ax[i, j].scatter(grid[0][:, i], grid[0][:, j], s=5, alpha=0.5)
+                        ax[i, j].set_xlabel(f'$u_{i+1}$')
+                        ax[i, j].set_ylabel(f'$u_{j+1}$')
+
+            plt.tight_layout()
+
+        if show:
+            plt.show()
+
+    def visualize_kde(self, kde_approximation, grid: tuple, ax):
+        """
+        Visualizes the KDE approximation on the grid for N-dimensional cases.
+        Only used from sampling_quality method.
+
+        Parameters:
+        - kde_approximation (np.ndarray): KDE approximation of the samples.
+        - grid (tuple): The grid used to evaluate the KDE.
+        - dim_num_points (list): Number of points per dimension for grid.
+        - ax (matplotlib.axes.Axes): Axis to plot the KDE on.
+
+        Returns:
+        - None
+        """
+        if self.dimension == 1:
+            # 1D Case: Plot KDE approximation as a line plot
+            ax.plot(grid[0][:, 0], kde_approximation, label='KDE Approximation')
+            ax.set_xlabel('$u_1$')
+            ax.set_ylabel('Density')
+            ax.set_title('KDE Approximation')
+
+        elif self.dimension == 2:
+            # 2D Case: Use imshow for KDE approximation heatmap
+            kde_approximation_reshaped = kde_approximation.reshape((grid[2][0], grid[2][1]))
+            ax.imshow(kde_approximation_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
+                                                            grid[0][:, 1].min(), grid[0][:, 1].max()],
+                    origin='lower', aspect='auto')
+            ax.set_title('KDE Approximation')
+
+        else:
+            # N-dimensional Case: Use pair plots
+            for i in range(self.dimension):
+                for j in range(self.dimension):
+                    if i == j:
+                        # Diagonal: 1D KDE approximation
+                        ax[i, j].plot(grid[0][:, i], kde_approximation, label='KDE', alpha=0.5)
+                        ax[i, j].set_xlabel(f'$u_{i+1}$')
+                    else:
+                        # Off-diagonal: 2D scatter plot
+                        ax[i, j].scatter(grid[0][:, i], grid[0][:, j], s=5, alpha=0.5)
+                        ax[i, j].set_xlabel(f'$u_{i+1}$')
+                        ax[i, j].set_ylabel(f'$u_{j+1}$')
+
+        plt.tight_layout()
+
+    def create_grid(self, visual = None, max_points: int = 100, min_points: int = 10, margin: float = 0.1, ranges: list = None):
+        """
+        Creates a grid for comparing samples or posterior, with adaptive num_points for each dimension
+        based on relative ranges and scaling for total number of dimensions.
+        
+        Parameters:
+        - samples (np.ndarray): Generated samples (used to determine bounds if provided).
+        - posterior (callable): A posterior function (used to determine bounds if no samples are provided).
+        - max_points (int): Maximum number of grid points for the longest range (default is 100).
+        - min_points (int): Minimum number of grid points for the shortest range (default is 10).
+        - margin (float): Margin to extend the grid beyond the sample bounds (default is 10%).
+
+        Returns:
+        - grid (np.ndarray): Multi-dimensional grid of shape (num_points^dimension, dimension).
+        - ranges (list of tuples): List of min and max bounds for each dimension.
+        """
+
+        dim_ranges = []
+        if ranges is None:
+            ranges = []
+
+        # Case 1: If samples are provided, use them to calculate the grid bounds
+        if isinstance(visual, np.ndarray):
+            for dim in range(self.dimension):
+                dim_min = np.min(visual[:, dim])
+                dim_max = np.max(visual[:, dim])
+                dim_range = dim_max - dim_min
+                dim_ranges.append(dim_range)
+
+                # Add margin to extend the bounds
+                range_min = dim_min - margin * dim_range
+                range_max = dim_max + margin * dim_range
+                ranges.append((range_min, range_max))
+        
+        # Case 2: If a posterior function is provided, use default heuristic ranges
+        elif (visual is None or callable(visual)):
+            if ranges == []:
+                for dim in range(self.dimension):
+                    ranges.append((-5, 5))  # Use default range for posterior
+                    dim_ranges.append(10)  # Example range for posterior
+            else:
+                if len(ranges) != self.dimension:
+                    raise ValueError("Ranges must be provided for each dimension.")
+                else:
+                    dim_ranges = [r[1] - r[0] for r in ranges]
+
+        # Find the longest range and normalize other ranges relative to it
+        max_range = max(dim_ranges)
+
+        # Calculate num_points for each dimension, relative to the max range and the number of dimensions
+        dim_num_points = []
+        for dim_range in dim_ranges:
+            relative_scale = dim_range / max_range
+            num_points = int(relative_scale * (max_points - min_points) + min_points)
+            num_points = int(num_points * (1 / self.dimension))  # Scale down based on number of dimensions
+            num_points = max(min_points, min(max_points, num_points))  # Ensure within bounds
+            dim_num_points.append(num_points)
+
+        # Create a grid using the determined ranges and num_points per dimension
+        grid_ranges = [np.linspace(r[0], r[1], n) for r, n in zip(ranges, dim_num_points)]
+        mesh = np.meshgrid(*grid_ranges, indexing='ij')
+
+        # Stack the meshgrid into a list of points in shape (num_points^dimension, dimension)
+        grid = np.vstack([m.ravel() for m in mesh]).T
+
+        return grid, ranges, dim_num_points
+
+    def animate_chain_movement(self, samples: np.ndarray, subsample_rate: int = 1, time: int = 60):
+        """
+        Creates an animation of a selected chain's movement through the sample space.
+
+        Parameters:
+        - samples (np.ndarray): Array of shape (N_gen, dimension) from the sampling algorithm.
+        - subsample_rate (int): Subsample the chain (default is 1).
+        - time (int): Time in seconds for the animation (default is 60).
+
+        Returns:
+        - None
+
+        Raises:
+        - ValueError if the samples array is not 2D or dimension is not 2.
+        """
+
+        # Ensure the correct shape and dimensionality
+        if samples.ndim != 2:
+            raise ValueError("Expected samples array of shape (N_gen, dimension)")
+
+        N_gen, dimension = samples.shape
+
+        if dimension != 2:
+            raise ValueError("Currently only 2D sample space is supported for animation.")
+
+        # Subsample the data
+        #samples = samples[::subsample_rate]
+
+        # Calculate the number of frames and the interval (in ms) between frames
+        num_frames = len(samples)
+        interval = (time / num_frames) * 1000  # Convert seconds to milliseconds per frame
+
+        # Create the figure and axis
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.set_xlim(np.min(samples[:, 0]) - 0.1, np.max(samples[:, 0]) + 0.1)
+        ax.set_ylim(np.min(samples[:, 1]) - 0.1, np.max(samples[:, 1]) + 0.1)
+
+        # Plot setup: initialize an empty scatter plot
+        scatter = ax.scatter([], [], c='blue')
+
+        # Initialize function for animation
+        def init():
+            scatter.set_offsets(np.empty((0, 2)))  # Initialize empty 2D array
+            return scatter,
+
+        # Update function for animation
+        def update(frame):
+            # Set the data for the current frame (i.e., up to the current sample)
+            scatter.set_offsets(samples[:frame])
+            return scatter,
+
+        # Create the animation
+        anim = animation.FuncAnimation(fig, update, frames=num_frames, init_func=init, interval=interval, blit=True)
+
+        # Display the animation
+        plt.show()
+
+    def sampling_quality(self, samples: np.ndarray, visualise: bool = False):
+        """
+        Compares KDE approximation from samples with the actual posterior using KL divergence.
+        
+        Parameters:
+        - samples (np.ndarray): Generated samples from the sampling algorithm.
+        
+        Returns:
+        - kl_divergence (float): KL Divergence value between the KDE approximation and the posterior.
+        """
+
+        dimension = samples.shape[-1]
+
+        # Check if samples come from multiple chains
+        if samples.ndim == 3:
+            samples = samples.transpose(1, 0, 2).reshape(-1, dimension)
+        elif samples.ndim > 3:
+            raise ValueError("Samples array must be 2D or 3D")
+
+        # Create a grid using the samples (adjustable for N dimensions)
+        grid = self.create_grid(visual=samples)
+
+        # Apply KDE to the samples
+        kde = gaussian_kde(samples.T)  # Transpose to match expected shape
+
+        # Evaluate the KDE on the grid
+        kde_approximation = kde(grid[0].T)  # Evaluate KDE on the grid points
+        kde_approximation_flat = kde_approximation.flatten()
+
+        # Evaluate the target posterior on the grid
+        target_pdf = np.array([self.posterior(u) for u in grid[0]])
+        target_pdf_flat = target_pdf.flatten()
+
+        # Normalize both distributions to ensure they sum to 1
+        kde_approximation_flat /= np.sum(kde_approximation_flat)
+        target_pdf_flat /= np.sum(target_pdf_flat)
+
+        # To avoid division by zero and log issues, add a small epsilon to the values
+        epsilon = 1e-10
+        kde_approximation_flat += epsilon
+        target_pdf_flat += epsilon
+
+        # Normalize both distributions again after adding epsilon
+        kde_approximation_flat /= np.sum(kde_approximation_flat)
+        target_pdf_flat /= np.sum(target_pdf_flat)
+
+        # Calculate Kullback-Leibler divergence
+        kl_divergence = entropy(target_pdf_flat, kde_approximation_flat)
+
+        if visualise:
+            # Visualize the KDE approximation and the target posterior
+            self.visualize(visuals=[{"data": kde_approximation, "is_kde": True}, self.posterior], grid=grid)
+
+        # Return KL Divergence value
+        return kl_divergence
+    
+    def optimalize(self, method: str = None, parametrs: list = [], parametr: str = None, range: tuple = None, metric: str = 'time'):
+        # this function will find the most optimal value for a given parametr, according to the chosen metric
+        parametr_values = np.linsapce(range[0], range[1], 100)
+        results = []
+
+        if metric == 'time':
+            pass
+
+        for par in parametr_values:
+            # time start
+            samples = self.method(parametrs, parametr = par)
+            # time end
+            results.append()
+
+        # plot parametr values against results
+
+        return np.min(results)
+    
+    def benchmark(self, method, parametrs, metric: str = None):
+        # this function will benchmark the chosen method
+        
+        # we will be looking at autocorrelation length, ESS (effective sample size), time complexity
+        # we will be looking at the chosen method for the chosen parametrs
+        # result data will be stored in table and plot showcasing the benchmark
+
+        return # table, plot
+
+    def compare(self, methods_dic: dict = {}, metric: str = None):
+        # this function will just be used to call benchmark on all methods and then merge the result data intonice and comprehensive form
+        tables = []
+        plots = []
+
+        for method, parametrs in methods_dic:
+            tmp = self.benchmark(self, method, parametrs, metric)
+            tables.append(tmp[0])
+            plots.append(tmp[1])
+
+        # merge tables
+
+        # merge and show plots
+
+        return tables
     
