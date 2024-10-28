@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from typing import Callable
 import matplotlib.animation as animation
 from scipy.stats import gaussian_kde, entropy
+from IPython.display import HTML
 
 class Sampling:
     """
@@ -111,7 +112,24 @@ class Sampling:
             return samples, acc / N
         else:
             return samples
-        
+
+    def AM2(self, initial_cov=None, epsilon=1e-5, scale_factor=None, burnin=0.0, update_step=1):
+        """
+        Creates an instance of the Adaptive Metropolis algorithm for a given Sampling instance.
+
+        Parameters:
+        - initial_cov (np.ndarray): initial covariance matrix for the proposal distribution
+        - epsilon (float): small value to ensure positive definiteness of the covariance matrix
+        - scale_factor (float): scaling factor for the covariance matrix
+        - burnin (float): length of the burn-in period on a scale from 0 to 1
+        - update_step (int): number of samples between covariance matrix updates
+
+        Returns:
+        - AdaptiveMetropolis: an instance of the Adaptive Metropolis algorithm
+        """
+
+        return AM(self, initial_cov, epsilon, scale_factor, burnin, update_step)     
+
     def AM(self, 
            N: int = 10000, 
            initial: np.ndarray = None, 
@@ -131,11 +149,12 @@ class Sampling:
         - update_step (int): number of samples between covariance matrix updates
         - burnin (float): length of the burnin period on a scale 0 to 1  
         - acc_rate (bool): if True, returns the acceptance rate
-        - cov_matrix (bool): if True, returns the covariance matrix
+        - cov_matrix (bool): if True, returns the covariance matrices
 
         Returns:
         - samples (np.ndarray): N samples
         - acceptance rate (float): acceptance rate
+        - cov_matrix_list (list): list of covariance matrices
 
         Example usage:
         ```
@@ -177,7 +196,7 @@ class Sampling:
                 current_likelihood = proposal_likelihood
             if i >= burnin_index:
                 samples[i-burnin_index, :] = current
-                if i>= burnin_index + 1:
+                if (i>= burnin_index + 1) and (i - burnin_index) % update_step == 0:
                     proposal_cov = (sd * np.cov(samples[:i-burnin_index+1].T)) + (sd * epsilon * np.eye(self.dimension))
                     if cov_matrix:
                         cov_matrix_list.append(proposal_cov)
@@ -274,8 +293,7 @@ class Sampling:
                 acceptance_probability2 = min(1, 
                     (proposal2_likelihood / current_likelihood) *
                     (1 - min(1, proposal_likelihood / proposal2_likelihood)) /
-                    (1 - acceptance_probability)
-                )
+                    (1 - acceptance_probability))
 
                 if np.random.rand() < acceptance_probability2:
                     current = proposal2
@@ -323,6 +341,7 @@ class Sampling:
         - outlier_detection (bool): if True, detect and correct outlier chains
         - adapt_CR (bool): if True, adapt the crossover probability during burn-in
         - chains (int): number of chains
+        - history_length (int): length of history for outlier detection
 
         Returns:
         - samples (np.ndarray): generated samples after burn-in
@@ -391,11 +410,14 @@ class Sampling:
             Detect and correct outlier chains based on the log posterior values.
 
             Parameters:
-            - log_posterior (np.ndarray): Log posterior values of all chains.
+            - prob_history (np.ndarray): Log posterior values for all chains.
+            - prob (np.ndarray): Log posterior values for the current generation.
             - current (np.ndarray): Current states of all chains.
+            - chains (int): Number of chains.
 
             Returns:
-            - current (np.ndarray): Updated states of all chains.
+            - current (np.ndarray): Corrected states of all chains.
+            - prob (np.ndarray): Corrected log posterior values for the current generation
             """
 
             prob_mean = np.mean(prob_history)
@@ -410,6 +432,17 @@ class Sampling:
             return current, prob
         
         def adapt_crossover_probability(gen, acceptance_rates):
+            """
+            Adapt the crossover probability based on the acceptance rates.
+
+            Parameters:
+            - gen (int): Current generation.
+            - acceptance_rates (np.ndarray): Acceptance rates for all chains.
+
+            Returns:
+            - CR (float): Adapted crossover probability.
+            """
+            
             # linearly decrease CR
             return max(0.3, 1 - gen / 10000)
 
@@ -447,9 +480,17 @@ class Sampling:
         Parameters:
         - visuals (list): A list containing the visuals to display (samples or posterior function).
         - grid (tuple): Grid for posterior and histogram comparisons (default is None).
+        - ranges (list): List of min and max bounds for each dimension (default is None).
+        - max_points (int): Maximum number of grid points for the longest range (default is 100).
 
         Returns:
         - None
+
+        Example usage:
+        ```
+        visualize(samples)
+        visualize(posterior, ranges=[(-5, 5), (-5, 5)], max_points=1000)
+        ```
         """
 
         if visuals == []:
@@ -498,9 +539,16 @@ class Sampling:
         - samples (np.ndarray): An array of samples to visualize.
         - grid (np.ndarray): Grid to base the histograms on (default is None).
         - ax (matplotlib.axes.Axes): Axis to plot the histograms on (default is None).
+        - show (bool): If True, displays the plot (default is True).
         
         Returns:
         - None
+
+        Example usage:
+        ```
+        visualize_samples_hist(samples, grid, ax)
+        visualize_samples_hist(samples, show=True)
+        ```
         """
 
         dimension = samples.shape[-1]
@@ -557,9 +605,16 @@ class Sampling:
         Parameters:
         - samples (np.ndarray): An array of samples to visualize.
         - ax (matplotlib.axes.Axes): Axis to plot the samples on (default is None).
+        - show (bool): If True, displays the plot (default is True).
         
         Returns:
         - None
+
+        Example usage:
+        ```
+        visualize_samples_scatter(samples, ax)
+        visualize_samples_scatter(samples, show=True)
+        ```
         """
 
         # Check if samples come from multiple chains
@@ -617,9 +672,18 @@ class Sampling:
         - posterior (np.ndarray): Evaluated posterior distribution.
         - grid (np.ndarray): Grid used for visualizing the posterior.
         - ax (matplotlib.axes.Axes): Axis to plot the posterior on (default is None).
+        - ranges (list): List of min and max bounds for each dimension (default is None).
+        - max_points (int): Maximum number of grid points for the longest range (default is 100).
+        - show (bool): If True, displays the plot (default is True).
         
         Returns:
         - None
+
+        Example usage:
+        ```
+        visualize_posterior(posterior, grid, ax)
+        visualize_posterior(posterior, grid, ranges=[(-5, 5), (-5, 5)], max_points=1000, show=True)
+        ```
         """
 
         # Create a grid if not provided
@@ -673,11 +737,15 @@ class Sampling:
         Parameters:
         - kde_approximation (np.ndarray): KDE approximation of the samples.
         - grid (tuple): The grid used to evaluate the KDE.
-        - dim_num_points (list): Number of points per dimension for grid.
         - ax (matplotlib.axes.Axes): Axis to plot the KDE on.
 
         Returns:
         - None
+
+        Example usage:
+        ```
+        visualize_kde(kde_approximation, grid, ax)
+        ```
         """
         if self.dimension == 1:
             # 1D Case: Plot KDE approximation as a line plot
@@ -716,15 +784,25 @@ class Sampling:
         based on relative ranges and scaling for total number of dimensions.
         
         Parameters:
-        - samples (np.ndarray): Generated samples (used to determine bounds if provided).
-        - posterior (callable): A posterior function (used to determine bounds if no samples are provided).
+        - visual (np.ndarray or Callable): Samples or posterior function to visualize.
         - max_points (int): Maximum number of grid points for the longest range (default is 100).
         - min_points (int): Minimum number of grid points for the shortest range (default is 10).
         - margin (float): Margin to extend the grid beyond the sample bounds (default is 10%).
+        - ranges (list): List of min and max bounds for each dimension (default is
 
         Returns:
         - grid (np.ndarray): Multi-dimensional grid of shape (num_points^dimension, dimension).
         - ranges (list of tuples): List of min and max bounds for each dimension.
+        - dim_num_points (list): Number of points per dimension for the grid.
+
+        Raises:
+        - ValueError if ranges are not provided for each dimension.
+
+        Example usage:
+        ```
+        grid, ranges, dim_num_points = create_grid(samples)
+        grid, ranges, dim_num_points = create_grid(posterior_function, ranges=[(-5, 5), (-5, 5)])
+        ```
         """
 
         dim_ranges = []
@@ -791,6 +869,13 @@ class Sampling:
 
         Raises:
         - ValueError if the samples array is not 2D or dimension is not 2.
+
+        Example usage:
+        ```
+        sampler = SamplingLIB(posterior_func=my_posterior, dimension=2)
+        samples = sampler.MH(N=1000, initial=np.zeros(2))
+        sampler.animate_chain_movement(samples)
+        ```
         """
 
         # Ensure the correct shape and dimensionality
@@ -832,7 +917,7 @@ class Sampling:
         anim = animation.FuncAnimation(fig, update, frames=num_frames, init_func=init, interval=interval, blit=True)
 
         # Display the animation
-        plt.show()
+        return HTML(anim.to_jshtml())  # Return the HTML representation for display
 
     def sampling_quality(self, samples: np.ndarray, visualise: bool = False):
         """
@@ -840,9 +925,17 @@ class Sampling:
         
         Parameters:
         - samples (np.ndarray): Generated samples from the sampling algorithm.
+        - visualise (bool): If True, visualizes the KDE approximation and the posterior (default is False).
         
         Returns:
         - kl_divergence (float): KL Divergence value between the KDE approximation and the posterior.
+
+        Example usage:
+        ```
+        sampler = SamplingLIB(posterior_func=my_posterior, dimension=2)
+        samples = sampler.MH(N=1000, initial=np.zeros(2))
+        kl_divergence = sampler.sampling_quality(samples)
+        ```
         """
 
         dimension = samples.shape[-1]
@@ -932,4 +1025,213 @@ class Sampling:
         # merge and show plots
 
         return tables
+
+class MH(Sampling):
+    pass
+
+class AM(Sampling):
+    """
+    Adaptive Metropolis algorithm for sampling from a target distribution.
+
+    Attributes:
+    - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
+    - scale_factor (float): Scaling factor for the covariance matrix.
+    - mean (np.ndarray): Mean of the samples.
+    - burnin (float): Fraction of the total number of samples to discard as burn-in.
+    - update_step (int): Number of samples between covariance matrix updates.
+    - C (list): List of covariance matrices.
+    - acc_rate (float): Acceptance rate of the samples.
+    - samples (np.ndarray): Generated samples.
+
+    Example usage:
+    ```
+    distribution = Sampling(posterior=my_posterior, dimension=2)
+    sampler = AM(distribution, initial_cov=np.eye(2), epsilon=1e-5, scale_factor=None, burnin=0.2, update_step=1)
+    samples = sampler.sample(N=10000)
+    ```
+    """
+
+    def __init__(self, distribution, initial_cov, epsilon, scale_factor, burnin, update_step):
+        """
+        Initialize the Adaptive Metropolis algorithm.
+
+        Parameters:
+        - distribution (Sampling): Sampling object with the target distribution.
+        - initial_cov (np.ndarray): Initial covariance matrix for the proposal distribution.
+        - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
+        - scale_factor (float): Scaling factor for the covariance matrix.
+        - burnin (float): Fraction of the total number of samples to discard as burn-in.
+        - update_step (int): Number of samples between covariance matrix updates.
+        """
+
+        # Inherit attributes from Sampling class
+        super().__init__(distribution.posterior, distribution.dimension)
+
+        # Additional attributes for AM
+        self.epsilon = epsilon
+        self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
+        self.mean = np.zeros(self.dimension)
+        self.burnin = burnin
+        self.update_step = update_step
+        self.C = [np.eye(self.dimension)] if initial_cov is None else [initial_cov]
+        self.acc_rate = 0.0
+        self.samples = None
+
+    def sample(self, x0 = None, N = 10000):
+        """
+        Run the Adaptive Metropolis algorithm for n_samples iterations.
+
+        Parameters:
+        - x0 (np.ndarray): Initial point for the chain.
+        - N (int): Number of samples to generate.
+
+        Returns:
+        - None
+        """
+
+        current = np.zeros(self.dimension) if x0 is None else x0
+        acc = 0
+        current_likelihood = self.posterior(current)
+        burnin_index = int(self.burnin * N)
+        self.samples = np.zeros((N, self.dimension))
+        
+        for t in range(N + burnin_index):
+            # Propose a new point
+            proposal = np.random.multivariate_normal(current, self.scale_factor * self.C[-1])
+            proposal_likelihood = self.posterior(proposal)
+            acceptance_probability = min(1, proposal_likelihood / current_likelihood)
+            if np.random.rand() < acceptance_probability: # Accept the proposal with probability "acceptance_probability"
+                current = proposal  
+                current_likelihood = proposal_likelihood
+                acc += 1
+            if t >= burnin_index:
+                self.samples[t-burnin_index, :] = current
+                if (t >= burnin_index + 1) and (t - burnin_index) % self.update_step == 0:
+                    # Update covariance matrix with the recursive formula
+                    old_mean = self.mean
+                    self.mean = old_mean + (current - old_mean) / t
+                    diff = np.outer(current - self.mean, current - self.mean)
+                    self.C.append((t - 1) / t * self.C[-1] + (self.scale_factor / t) * (diff + self.epsilon * np.eye(self.dimension)))
+        
+        self.acc_rate = acc / N
+
+class DRAM(Sampling):
+    """
+    Delayed Rejection Adaptive Metropolis (DRAM) algorithm for sampling from a target distribution.
     
+    Attributes:
+    - scale_factor (float): Scaling factor for the proposal covariance matrix.
+    - epsilon (float): Small constant for numerical stability.
+    - burnin (float): Fraction of the total number of samples to discard as burn-in.
+    - update_step (int): Number of samples between covariance matrix updates.
+    - num_stages (int): Number of proposal stages for delayed rejection.
+    - gammas (list): List of scaling factors for each proposal stage.
+    - C (list): List of covariance matrices.
+    - samples (np.ndarray): Generated samples.
+    - mean (np.ndarray): Mean of the samples.
+    - acc_rate (float): Acceptance rate of the samples.
+
+    Example usage:
+    ```
+    distribution = Sampling(posterior=my_posterior, dimension=2)
+    sampler = DRAM(distribution, scale_factor=0.1, gammas=[1.0, 0.5], epsilon=1e-8, burnin=0.2, update_step=1, num_stages=2)
+    samples = sampler.sample(N=10000)
+    ```
+    """
+
+    def __init__(self, distribution, scale_factor=None, gammas=None, epsilon=1e-8, burnin = 0.0, update_step = 1, num_stages=2):
+        """
+        DRAM initialization.
+        
+        Parameters:
+        - posterior: Posterior distribution function.
+        - dimension: Number of dimensions for the parameter space.
+        - scaling_factor: Scaling factor for the proposal covariance matrix.
+        - gammas: List of scaling factors for each proposal stage. Default: [1.0, 0.5] (for 2 stages).
+        - epsilon: Regularization term to avoid singular matrices.
+        - n0: Number of initial iterations before adaptation starts.
+        - num_stages: Number of proposal stages for delayed rejection.
+        """
+
+        super().__init__(distribution.posterior, distribution.dimension)
+        self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
+        self.epsilon = epsilon  # Small constant for numerical stability
+        self.burnin = burnin  # Non-adaptive period
+        self.num_stages = num_stages  # Number of delayed rejection stages
+        self.update_step = update_step  # Update covariance matrix every n samples
+        self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)] if gammas is None else gammas
+        self.C = np.eye(self.dimension)  # Initial covariance matrix
+        self.samples = None  # To store past samples
+        self.mean = np.zeros(self.dimension)  # Mean of the samples
+
+    def acceptance_probability(self, lh):
+        """
+        Calculate the acceptance probability for a given likelihood history.
+        
+        Parameters:
+        - lh: Likelihood history for the current stage.
+
+        Returns:
+        - alpha: Acceptance probability for the likelihood history.
+        """
+
+        alpha = lh[-1] / lh[0]
+
+        numerator = 1.0
+        denominator = 1.0
+
+        for i in range(len(lh) - 2, 0, -1):
+            numerator *= (1 - self.acceptance_probability(lh[i:][::-1]))
+            denominator *= (1 - self.acceptance_probability(lh[:len(lh) - i]))
+            
+        alpha *= numerator / denominator
+        
+        return min(1, alpha)
+
+    def sample(self, x0, N=10000):
+        """
+        Run the DRAM algorithm with multiple proposal stages.
+
+        Parameters:
+        - x0: Initial point for the chain.
+        - N: Number of samples to generate.
+
+        Returns:
+        - None
+        """
+    
+        current = np.zeros(self.dimension) if x0 is None else x0
+        acc = 0
+        current_likelihood = self.posterior(current)
+        burnin_index = int(self.burnin * N)
+        self.samples = np.zeros((N, self.dimension))
+
+        for n in range(N + burnin_index):
+            likelihood_history = [current_likelihood]
+            for stage in range(1, self.num_stages + 1):
+                # Propose a new point for the current stage
+                proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage - 1] * self.C)
+                proposal_likelihood = self.posterior(proposal)
+                likelihood_history.append(proposal_likelihood)
+
+                # Calculate acceptance probability for the current stage
+                alpha = self.acceptance_probability(lh=likelihood_history)
+
+                if np.random.rand() < alpha:
+                    current = proposal  # Accept the proposal
+                    acc += 1
+                    break 
+
+            if n >= burnin_index:
+                self.samples[n-burnin_index, :] = current
+                if (n >= burnin_index + 1) and (n - burnin_index) % self.update_step == 0:
+                    # Update covariance matrix with the recursive formula
+                    old_mean = self.mean
+                    self.mean = old_mean + (current - old_mean) / n
+                    diff = np.outer(current - self.mean, current - self.mean)
+                    self.C.append((n - 1) / n * self.C[-1] + (self.scale_factor / n) * (diff + self.epsilon * np.eye(self.dimension)))
+        
+        self.acc_rate = acc / N
+
+class DREAM(Sampling):
+    pass
