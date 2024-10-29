@@ -52,6 +52,22 @@ class Sampling:
         self.posterior = posterior
         self.dimension = parametr_dimension
 
+    def MH2(self, initial_cov=None, epsilon=1e-5, scale_factor=None, burnin=0.0):
+        """
+        Creates an instance of the Metropolis algorithm for a given Sampling instance.
+
+        Parameters:
+        - initial_cov (np.ndarray): initial covariance matrix for the proposal distribution
+        - epsilon (float): small value to ensure positive definiteness of the covariance matrix
+        - scale_factor (float): scaling factor for the covariance matrix
+        - burnin (float): length of the burn-in period on a scale from 0 to 1
+
+        Returns:
+        - AdaptiveMetropolis: an instance of the Adaptive Metropolis algorithm
+        """
+
+        return MH(distribution=self, initial_cov=initial_cov, epsilon=epsilon, scale_factor=scale_factor, burnin=burnin)
+
     def MH(self, 
         N: int = 10000, 
         initial: np.ndarray = None, 
@@ -128,7 +144,8 @@ class Sampling:
         - AdaptiveMetropolis: an instance of the Adaptive Metropolis algorithm
         """
 
-        return AM(self, initial_cov, epsilon, scale_factor, burnin, update_step)     
+        return AM(distribution=self, initial_cov=initial_cov, epsilon=epsilon, scale_factor=scale_factor, 
+                  burnin=burnin, update_step=update_step)     
 
     def AM(self, 
            N: int = 10000, 
@@ -218,7 +235,27 @@ class Sampling:
             return samples, cov_matrix_list
         else:
             return samples
-        
+
+    def DRAM2(self, initial_cov=None, scale_factor=None, gammas=None,  epsilon=1e-5, burnin=0.0, update_step=1, num_stages=2):
+        """
+        Creates an instance of the DRAM algorithm for a given Sampling instance.
+
+        Parameters:
+        - initial_cov (np.ndarray): initial covariance matrix for the proposal distribution
+        - scale_factor (float): scaling factor for the covariance matrix
+        - epsilon (float): small value to ensure positive definiteness of the covariance matrix
+        - gammas (list): scaling factors for the covariance matrix at each stage
+        - burnin (float): length of the burn-in period on a scale from 0 to 1
+        - update_step (int): number of samples between covariance matrix updates
+        - num_stages (int): number of stages for the DRAM algorithm
+
+        Returns:
+        - AdaptiveMetropolis: an instance of the Adaptive Metropolis algorithm
+        """
+
+        return DRAM(distribution=self, inicial_cov=initial_cov, scale_factor=scale_factor, gammas=gammas, 
+                    epsilon=epsilon, burnin=burnin, update_step=update_step, num_stages=num_stages)
+
     def DRAM(self, 
              N: int = 10000, 
              initial: np.ndarray = None, 
@@ -855,7 +892,7 @@ class Sampling:
 
         return grid, ranges, dim_num_points
 
-    def animate_chain_movement(self, samples: np.ndarray, subsample_rate: int = 1, time: int = 60):
+    def animate_chain_movement(self, samples: np.ndarray, subsample_rate: int = 1, time: int = 60, html: bool = True):
         """
         Creates an animation of a selected chain's movement through the sample space.
 
@@ -917,7 +954,10 @@ class Sampling:
         anim = animation.FuncAnimation(fig, update, frames=num_frames, init_func=init, interval=interval, blit=True)
 
         # Display the animation
-        return HTML(anim.to_jshtml())  # Return the HTML representation for display
+        if html:
+            return HTML(anim.to_jshtml())  # Return the HTML representation for display
+        else:
+            plt.show()
 
     def sampling_quality(self, samples: np.ndarray, visualise: bool = False):
         """
@@ -1027,11 +1067,88 @@ class Sampling:
         return tables
 
 class MH(Sampling):
-    pass
+    """
+    Random Walk Metropolis algorithm for sampling from a target distribution.
+    Uses a Gaussian proposal distribution.
+
+    Attributes:
+    - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
+    - scale_factor (float): Scaling factor for the covariance matrix.
+    - mean (np.ndarray): Mean of the samples.
+    - burnin (float): Fraction of the total number of samples to discard as burn-in.
+    - C (list): List of covariance matrices.
+    - acc_rate (float): Acceptance rate of the samples.
+    - samples (np.ndarray): Generated samples.
+
+    Example usage:
+    ```
+    distribution = Sampling(posterior=my_posterior, dimension=2)
+    sampler = MG(distribution, initial_cov=np.eye(2), epsilon=1e-5, burnin=0.2)
+    samples = sampler.sample(N=10000)
+    ```
+    """
+
+    def __init__(self, distribution, initial_cov, epsilon, scale_factor, burnin):
+        """
+        Initialize the Random Walk Metropolis algorithm.
+
+        Parameters:
+        - distribution (Sampling): Sampling object with the target distribution.
+        - initial_cov (np.ndarray): Initial covariance matrix for the proposal distribution.
+        - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
+        - scale_factor (float): Scaling factor for the covariance matrix.
+        - burnin (float): Fraction of the total number of samples to discard as burn-in.
+        """
+
+        # Inherit attributes from Sampling class
+        super().__init__(distribution.posterior, distribution.dimension)
+
+        # Additional attributes for AM
+        self.epsilon = epsilon
+        self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
+        self.mean = np.zeros(self.dimension)
+        self.burnin = burnin
+        self.C = np.eye(self.dimension) if initial_cov is None else initial_cov
+        self.acc_rate = 0.0
+        self.samples = None
+
+    def sample(self, x0 = None, N = 10000):
+        """
+        Run the Adaptive Metropolis algorithm for n_samples iterations.
+
+        Parameters:
+        - x0 (np.ndarray): Initial point for the chain.
+        - N (int): Number of samples to generate.
+
+        Returns:
+        - None
+        """
+
+        current = np.zeros(self.dimension) if x0 is None else x0
+        acc = 0
+        current_likelihood = self.posterior(current)
+        burnin_index = int(self.burnin * N)
+        self.samples = np.zeros((N, self.dimension))
+        
+        for t in range(N + burnin_index):
+            # Propose a new point
+            proposal = np.random.multivariate_normal(current, self.scale_factor * self.C)
+            proposal_likelihood = self.posterior(proposal)
+            acceptance_probability = min(1, proposal_likelihood / current_likelihood)
+            if np.random.rand() < acceptance_probability: # Accept the proposal with probability "acceptance_probability"
+                current = proposal  
+                current_likelihood = proposal_likelihood
+                acc += 1
+            if t >= burnin_index:
+                self.samples[t-burnin_index, :] = current
+        
+        self.acc_rate = acc / N
+        self.mean = np.mean(self.samples, axis=0)
 
 class AM(Sampling):
     """
     Adaptive Metropolis algorithm for sampling from a target distribution.
+    Uses a Gaussian proposal distribution.
 
     Attributes:
     - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
@@ -1051,7 +1168,7 @@ class AM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov, epsilon, scale_factor, burnin, update_step):
+    def __init__(self, distribution, initial_cov=None, epsilon=1e5, scale_factor=None, burnin=0.1, update_step=1):
         """
         Initialize the Adaptive Metropolis algorithm.
 
@@ -1077,7 +1194,7 @@ class AM(Sampling):
         self.acc_rate = 0.0
         self.samples = None
 
-    def sample(self, x0 = None, N = 10000):
+    def sample(self, x0=None, N=10000):
         """
         Run the Adaptive Metropolis algorithm for n_samples iterations.
 
@@ -1118,6 +1235,7 @@ class AM(Sampling):
 class DRAM(Sampling):
     """
     Delayed Rejection Adaptive Metropolis (DRAM) algorithm for sampling from a target distribution.
+    Uses a Gaussian proposal distribution.
     
     Attributes:
     - scale_factor (float): Scaling factor for the proposal covariance matrix.
@@ -1139,7 +1257,7 @@ class DRAM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, scale_factor=None, gammas=None, epsilon=1e-8, burnin = 0.0, update_step = 1, num_stages=2):
+    def __init__(self, distribution, inicial_cov, scale_factor, gammas, epsilon, burnin, update_step, num_stages):
         """
         DRAM initialization.
         
@@ -1160,7 +1278,7 @@ class DRAM(Sampling):
         self.num_stages = num_stages  # Number of delayed rejection stages
         self.update_step = update_step  # Update covariance matrix every n samples
         self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)] if gammas is None else gammas
-        self.C = np.eye(self.dimension)  # Initial covariance matrix
+        self.C = [np.eye(self.dimension)] if inicial_cov is None else [inicial_cov] # list of covariance matrices
         self.samples = None  # To store past samples
         self.mean = np.zeros(self.dimension)  # Mean of the samples
 
@@ -1175,7 +1293,7 @@ class DRAM(Sampling):
         - alpha: Acceptance probability for the likelihood history.
         """
 
-        alpha = lh[-1] / lh[0]
+        alpha = (lh[-1] + 1e-10) / (lh[0] + 1e-10)
 
         numerator = 1.0
         denominator = 1.0
@@ -1184,11 +1302,11 @@ class DRAM(Sampling):
             numerator *= (1 - self.acceptance_probability(lh[i:][::-1]))
             denominator *= (1 - self.acceptance_probability(lh[:len(lh) - i]))
             
-        alpha *= numerator / denominator
+        alpha *= (numerator + 1e-10) / (denominator + 1e-10)
         
         return min(1, alpha)
 
-    def sample(self, x0, N=10000):
+    def sample(self, x0=None, N=10000):
         """
         Run the DRAM algorithm with multiple proposal stages.
 
@@ -1201,16 +1319,18 @@ class DRAM(Sampling):
         """
     
         current = np.zeros(self.dimension) if x0 is None else x0
-        acc = 0
+        acc = np.zeros((self.num_stages, 2))
         current_likelihood = self.posterior(current)
         burnin_index = int(self.burnin * N)
         self.samples = np.zeros((N, self.dimension))
 
         for n in range(N + burnin_index):
             likelihood_history = [current_likelihood]
-            for stage in range(1, self.num_stages + 1):
+            for stage in range(self.num_stages):
+                acc[stage, 0] += 1
+
                 # Propose a new point for the current stage
-                proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage - 1] * self.C)
+                proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage] * self.C[-1])
                 proposal_likelihood = self.posterior(proposal)
                 likelihood_history.append(proposal_likelihood)
 
@@ -1219,7 +1339,8 @@ class DRAM(Sampling):
 
                 if np.random.rand() < alpha:
                     current = proposal  # Accept the proposal
-                    acc += 1
+                    current_likelihood = proposal_likelihood
+                    acc[stage, 1] += 1
                     break 
 
             if n >= burnin_index:
@@ -1231,7 +1352,82 @@ class DRAM(Sampling):
                     diff = np.outer(current - self.mean, current - self.mean)
                     self.C.append((n - 1) / n * self.C[-1] + (self.scale_factor / n) * (diff + self.epsilon * np.eye(self.dimension)))
         
-        self.acc_rate = acc / N
+        self.acc_rate = acc[:, 1] / acc[:, 0]
 
 class DREAM(Sampling):
-    pass
+    def __init__(self, distribution, num_chains, crossover_prob=0.8, gamma=2.38, burnin_ratio=0.1, nCR=3):
+        """
+        Initializes the DREAM sampling algorithm.
+        
+        Parameters:
+        - posterior: Target posterior distribution.
+        - dimension: Dimensionality of the parameter space.
+        - num_chains: Number of chains for sampling.
+        - crossover_prob (CR): Crossover probability for subspace sampling.
+        - gamma: Scaling factor for proposal step sizes.
+        - burnin_ratio: Fraction of the total steps for burn-in.
+        - nCR: Number of crossover probabilities to explore during burn-in.
+        """
+        
+        super().__init__(distribution.posterior, distribution.dimension)
+        self.num_chains = num_chains
+        self.crossover_prob = crossover_prob
+        self.gamma = gamma / np.sqrt(2 * self.dimension)
+        self.burnin_ratio = burnin_ratio
+        self.nCR = nCR
+        self.samples = []
+        self.accepted = 0
+
+    def initialize_population(self, prior):
+        """
+        Initializes a population of chains using the given prior distribution.
+        """
+        return np.array([prior.rvs(self.dimension) for _ in range(self.num_chains)])
+    
+    def propose_point(self, population, chain_idx):
+        """
+        Generates a candidate point for the given chain using differential evolution.
+        """
+        r1, r2 = np.random.choice(self.num_chains, 2, replace=False)
+        proposal = population[chain_idx] + self.gamma * (population[r1] - population[r2])
+        return proposal
+    
+    def acceptance_probability(self, current_likelihood, proposal_likelihood):
+        """
+        Computes the acceptance probability for the proposal.
+        """
+        return min(1, proposal_likelihood / current_likelihood)
+
+    def run(self, prior, num_generations):
+        """
+        Runs the DREAM algorithm over a specified number of generations.
+        
+        Parameters:
+        - prior: Prior distribution to initialize the population.
+        - num_generations: Number of generations to run.
+        
+        Returns:
+        - Array of sampled points from the posterior distribution.
+        """
+        population = self.initialize_population(prior)
+        for gen in range(num_generations):
+            for chain_idx in range(self.num_chains):
+                current_point = population[chain_idx]
+                current_likelihood = self.posterior(current_point)
+                
+                # Proposal generation using differential evolution
+                proposal = self.propose_point(population, chain_idx)
+                proposal_likelihood = self.posterior(proposal)
+
+                # Compute acceptance probability
+                alpha = self.acceptance_probability(current_likelihood, proposal_likelihood)
+                
+                if np.random.rand() < alpha:
+                    population[chain_idx] = proposal
+                    self.accepted += 1
+                    
+            # Store samples post-burn-in
+            if gen > num_generations * self.burnin_ratio:
+                self.samples.append(population.copy())
+
+        return np.array(self.samples)
