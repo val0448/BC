@@ -1688,7 +1688,8 @@ class DREAM(Sampling):
                     diff += current[indices[0]][i] - current[indices[1]][i]
 
                 e = np.random.uniform(-self.eps, self.eps)
-                proposal_point[i] = current[chain][i] + (gamma * diff) + e
+                eps = np.random.uniform(0, self.eps)
+                proposal_point[i] = current[chain][i] + (np.eye(self.dimension) + e) * (gamma * diff) + eps
             else:
                 d -= 1
 
