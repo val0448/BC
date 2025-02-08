@@ -93,8 +93,8 @@ class Sampling:
             - float: The likelihood of the forward model given the data.
             """
 
-            y_pred = forward_model(point)
-            likelihood = -((observed_data - y_pred) ** 2) / (2 * noise_std ** 2)
+            y_pred = self.forward_model(point)
+            likelihood = -((self.observed_data - y_pred) ** 2) / (2 * self.noise_std ** 2)
             if self.log:
                 return likelihood
             else:
@@ -105,7 +105,7 @@ class Sampling:
         self.noise_std = noise_std
 
         if (likelihood is None) and (posterior is None):
-            if forward_model is None or observed_data is None or noise_std is None:
+            if self.forward_model is None or self.observed_data is None or self.noise_std is None:
                 raise ValueError("`forward_model`, `observed_data`, and `noise_std` are required to set up the likelihood.")
             return likelihood_func
         else:
@@ -127,9 +127,9 @@ class Sampling:
         self.prior_stds = prior_stds
 
         if (prior is None) and (posterior is None):
-            if prior_means is None or prior_stds is None:
+            if (self.prior_means) is None or (self.prior_stds) is None:
                 raise ValueError("`prior_means` and `prior_stds` are required to set up the prior.")
-            if len(prior_means) != len(prior_stds):
+            if len(self.prior_means) != len(self.prior_stds):
                 raise ValueError("`prior_means` and `prior_stds` must have the same length.")
 
             return self._create_gaussian_pdf()
@@ -158,15 +158,13 @@ class Sampling:
             - float: The posterior probability density at the given point.
             """
 
-            prob = self.likelihood(point) + self.prior(point)
-
             if self.log:
-                return prob
+                return self.likelihood(point) + self.prior(point)
             else:
-                return np.exp(prob)
+                return self.likelihood(point) * self.prior(point)
 
         if posterior is None:
-            if self.likelihood is None or self.prior is None:
+            if (self.likelihood is None) or (self.prior is None):
                 raise ValueError("`likelihood` and `prior` are required to set up the posterior.")
             return posterior_func
         else:
@@ -212,9 +210,9 @@ class Sampling:
 
             # Compute the Gaussian PDF in log space
             pos = point - mean
-            exponent = -0.5 * pos.T @ inv_covariance @ pos
-            normalization_constant_log = -0.5 * self.dimension * np.log(2 * np.pi * std ** 2)
-            pdf = normalization_constant_log + exponent
+            exponent = -0.5 * (np.dot(pos.T, inv_covariance).dot(pos))
+            #normalization_constant_log = -0.5 * self.dimension * np.log(2 * np.pi * std ** 2)
+            pdf = exponent #+ normalization_constant_log
 
             return pdf if self.log else np.exp(pdf)
 
@@ -233,422 +231,15 @@ class Sampling:
 
             if self.log:
                 max_density = np.max(densities)
-                combined_log_density = max_density + np.log(np.sum(np.exp(densities - max_density)) / len(self.prior_means))
+                combined_log_density = max_density + np.log(np.sum(np.exp(densities - max_density)))
                 return combined_log_density
             else:
-                return np.sum(densities) / len(self.prior_means)
+                return np.sum(densities)# / len(self.prior_means)
 
         if len(self.prior_means) > 0:
             return combined_gaussian_pdf
         else:
             raise ValueError("Invalid number of prior means and standard deviations.")
-
-    def MH(self, 
-        N: int = 10000, 
-        initial: np.ndarray = None, 
-        proposal_distribution: Callable = None, 
-        burnin: float = 0, 
-        acc_rate :bool =False):
-        """
-        Random walk Metropolis-Hastings algorithm.
-
-        Parameters:
-        - N (int): number of samples
-        - initial (np.ndarray): initial sample
-        - proposal_distribution (Callable): function to draw samples from
-        - burnin (float): length of the burnin period on a scale 0 to 1 
-        - acc_rate (bool): if True, returns the acceptance rate 
-
-        Returns:
-        - samples (np.ndarray): N samples
-        - acceptance rate (float): acceptance rate
-
-        Example usage:
-        ```
-        sampler = SamplingLIB()
-        samples = sampler.MH(N=1000, initial=np.zeros(2), proposal_distribution=np.random.normal, burnin=0.2)
-        ```
-
-        """
-        if initial is None:
-            initial = np.zeros(self.dimension)
-
-        if proposal_distribution is None:
-            def proposal_distribution(mu): return np.random.normal(mu, 1.0)
-
-        if burnin < 0 or burnin > 1:
-            raise ValueError('Burnin period should be between 0 and 1.')
-        
-        if acc_rate:
-            acc = 0
-
-        burnin_index = int(burnin * N)
-        samples = np.zeros((N, self.dimension))
-        current = initial
-        current_likelihood = self.posterior(current)
-
-        for i in range(N + burnin_index):
-            proposal = proposal_distribution(current)
-            proposal_likelihood = self.posterior(proposal)
-            if self.log:
-                acceptance_probability = min(1, np.exp(proposal_likelihood - current_likelihood))
-            else:
-                acceptance_probability = min(1, proposal_likelihood / current_likelihood)
-            if np.random.rand() < acceptance_probability:
-                if acc_rate:
-                    acc += 1
-                current = proposal
-                current_likelihood = proposal_likelihood
-            if i >= burnin_index:
-                samples[i-burnin_index, :] = current
-
-        if acc_rate:
-            return samples, acc / N
-        else:
-            return samples 
-
-    def AM(self, 
-           N: int = 10000, 
-           initial: np.ndarray = None, 
-           proposal_cov: np.ndarray = None,
-           update_step: int = 1,
-           burnin: float = 0, 
-           acc_rate: bool = False,
-           cov_matrix: bool = False
-           ):
-        """
-        Adaptive Metropolis algorithm.
-
-        Parameters:
-        - N (int): number of samples
-        - initial (np.ndarray): initial sample
-        - proposal_cov (np.ndarray): initial covariance matrix for the proposal distribution
-        - update_step (int): number of samples between covariance matrix updates
-        - burnin (float): length of the burnin period on a scale 0 to 1  
-        - acc_rate (bool): if True, returns the acceptance rate
-        - cov_matrix (bool): if True, returns the covariance matrices
-
-        Returns:
-        - samples (np.ndarray): N samples
-        - acceptance rate (float): acceptance rate
-        - cov_matrix_list (list): list of covariance matrices
-
-        Example usage:
-        ```
-        sampler = SamplingLIB()
-        samples = sampler.AM(N=1000, initial=np.zeros(2), proposal_distribution=np.random.normal, burnin=0.2)
-        ```
-
-        """
-        if initial is None:
-            initial = np.zeros(self.dimension)
-
-        if burnin < 0 or burnin > 1:
-            raise ValueError('Burnin period should be between 0 and 1.')
-        
-        if acc_rate:
-            acc = 0
-
-        burnin_index = int(burnin * N)
-        samples = np.zeros((N, self.dimension))
-        current = initial
-        current_likelihood = self.posterior(current)
-        sd = (2.4**2) / self.dimension
-        epsilon = 0.01
-
-        if proposal_cov is None:
-            proposal_cov = sd * np.eye(self.dimension)
-
-        if cov_matrix:
-            cov_matrix_list = [proposal_cov]
-
-        for i in range(N + burnin_index):
-            proposal = np.random.multivariate_normal(current, proposal_cov)
-            proposal_likelihood = self.posterior(proposal)
-            acceptance_probability = min(1, proposal_likelihood / current_likelihood)
-            if np.random.rand() < acceptance_probability:
-                if acc_rate:
-                    acc += 1
-                current = proposal
-                current_likelihood = proposal_likelihood
-            if i >= burnin_index:
-                samples[i-burnin_index, :] = current
-                if (i>= burnin_index + 1) and (i - burnin_index) % update_step == 0:
-                    proposal_cov = (sd * np.cov(samples[:i-burnin_index+1].T)) + (sd * epsilon * np.eye(self.dimension))
-                    if cov_matrix:
-                        cov_matrix_list.append(proposal_cov)
-                    """
-                    average_X_curr = np.mean(samples, axis=0)
-                    proposal_cov = (i-1/i) * proposal_cov + (sd/i) * (i * average_X_prev * average_X_prev.T - (i + 1) * average_X_curr * average_X_curr.T + current * current.T + epsilon * np.eye(self.dimension))
-                    if cov_matrix:
-                        cov_matrix_list.append(proposal_cov)
-                    average_X_prev = average_X_curr
-                else:
-                    average_X_prev = current
-                    """
-
-        if acc_rate and cov_matrix:
-            return samples, acc / N, cov_matrix_list
-        elif acc_rate:
-            return samples, acc / N
-        elif cov_matrix:
-            return samples, cov_matrix_list
-        else:
-            return samples
-
-    def DRAM(self, 
-             N: int = 10000, 
-             initial: np.ndarray = None, 
-             proposal_cov: np.ndarray = None,
-             update_step: int = 1,
-             burnin: float = 0, 
-             acc_rate: bool = False,
-             cov_matrix: bool = False,
-             beta: float = 0.5):
-        """
-        Delayed Rejection Adaptive Metropolis (DRAM) algorithm.
-
-        Parameters:
-        - N (int): number of samples
-        - initial (np.ndarray): initial sample
-        - proposal_cov (np.ndarray): initial covariance matrix for the proposal distribution
-        - update_step (int): number of samples between covariance matrix updates
-        - burnin (float): length of the burn-in period on a scale from 0 to 1  
-        - acc_rate (bool): if True, returns the acceptance rate
-        - cov_matrix (bool): if True, returns the covariance matrix
-        - beta (float): scaling factor for second-stage proposal (0 < beta < 1)
-
-        Returns:
-        - samples (np.ndarray): N samples
-        - acceptance rate (float): acceptance rate
-
-        Example usage:
-        ```
-        sampler = SamplingLIB(posterior_func=my_posterior, dimension=2)
-        samples = sampler.DRAM(N=1000, initial=np.zeros(2), burnin=0.2)
-        ```
-        """
-        if initial is None:
-            initial = np.zeros(self.dimension)
-
-        if burnin < 0 or burnin > 1:
-            raise ValueError('Burn-in period should be between 0 and 1.')
-
-        if acc_rate:
-            acc = 0
-
-        burnin_index = int(burnin * N)
-        samples = np.zeros((N, self.dimension))
-        current = initial
-        current_likelihood = self.posterior(current)
-        sd = (2.4**2) / self.dimension
-        epsilon = 1e-5
-
-        if proposal_cov is None:
-            proposal_cov = sd * np.eye(self.dimension)
-
-        if cov_matrix:
-            cov_matrix_list = [proposal_cov]
-
-        for i in range(N + burnin_index):
-            # First-stage proposal
-            proposal = np.random.multivariate_normal(current, proposal_cov)
-            proposal_likelihood = self.posterior(proposal)
-            acceptance_probability = min(1, proposal_likelihood / current_likelihood)
-
-            if np.random.rand() < acceptance_probability:
-                if acc_rate:
-                    acc += 1
-                current = proposal
-                current_likelihood = proposal_likelihood
-            else:
-                # Second-stage proposal (delayed rejection)
-                scaled_cov = beta**2 * proposal_cov
-                proposal2 = np.random.multivariate_normal(current, scaled_cov)
-                proposal2_likelihood = self.posterior(proposal2)
-
-                acceptance_probability2 = min(1, 
-                    (proposal2_likelihood / current_likelihood) *
-                    (1 - min(1, proposal_likelihood / proposal2_likelihood)) /
-                    (1 - acceptance_probability))
-
-                if np.random.rand() < acceptance_probability2:
-                    current = proposal2
-                    current_likelihood = proposal2_likelihood
-
-            # Burn-in period handling and storing samples
-            if i >= burnin_index:
-                samples[i - burnin_index, :] = current
-
-                # Update the covariance matrix adaptively
-                if i >= burnin_index + 1 and (i - burnin_index) % update_step == 0:
-                    sample_cov = np.cov(samples[:i-burnin_index+1].T)
-                    proposal_cov = sd * sample_cov + sd * epsilon * np.eye(self.dimension)
-                    if cov_matrix:
-                        cov_matrix_list.append(proposal_cov)
-
-        if acc_rate and cov_matrix:
-            return samples, acc / N, cov_matrix_list
-        elif acc_rate:
-            return samples, acc / N
-        elif cov_matrix:
-            return samples, cov_matrix_list
-        else:
-            return samples
-
-    def DREAM(self, 
-              N: int = 10000, 
-              initial: np.ndarray = None, 
-              burnin: float = 0.1, 
-              delta: int = 3, 
-              CR: float = 0.9,
-              outlier_detection: bool = True,
-              adapt_CR: bool = True,
-              chains: int = 10,
-              history_length: int = None):
-        """
-        Differential Evolution Adaptive Metropolis (DREAM) algorithm.
-
-        Parameters:
-        - N (int): number of generations (iterations) for the algorithm
-        - initial (np.ndarray): initial samples for the chains
-        - burnin (float): burn-in period as a fraction of N_gen
-        - delta (int): number of pairs used to generate proposals
-        - CR (float): initial crossover probability
-        - outlier_detection (bool): if True, detect and correct outlier chains
-        - adapt_CR (bool): if True, adapt the crossover probability during burn-in
-        - chains (int): number of chains
-        - history_length (int): length of history for outlier detection
-
-        Returns:
-        - samples (np.ndarray): generated samples after burn-in
-        - acceptance rates (list): acceptance rate for each chain
-        """
-        if initial is None:
-            initial = np.random.rand(chains, self.dimension)
-
-        if burnin < 0 or burnin > 1:
-            raise ValueError('Burn-in period should be between 0 and 1.')
-        
-        if history_length is None:
-            history_length = min(100, max(10, N//100))
-
-        burnin_index = int(burnin * N)
-        samples = np.zeros((N, chains, self.dimension))
-        current = initial.copy()
-        prob = np.array([self.posterior(x) for x in current])
-        prob_history = np.zeros((N, chains))
-        prob_history[0] = prob
-        acceptance_counts = np.zeros(chains)
-
-        gamma = 2.38 / np.sqrt(2 * delta * self.dimension)
-        eps = 1e-6
-
-        def differential_evolution_proposal(i, CR, current):
-            """
-            Generate a proposal using Differential Evolution (DE).
-            
-            Parameters:
-            - i (int): Index of the chain for which to generate the proposal.
-            - CR (float): Crossover probability.
-            - current (np.ndarray): Current states of all chains.
-            
-            Returns:
-            - z (np.ndarray): Proposed state.
-            """
-
-            chains = current.shape[0]
-            dimension = current.shape[1]
-
-            # Select two distinct chains randomly, ensuring they are not the current chain
-            indices = np.random.choice([j for j in range(chains) if j != i], size=2, replace=False)
-            x1, x2 = current[indices[0]], current[indices[1]]
-
-            # Compute the difference vector
-            diff = x1 - x2
-
-            # Generate the proposed point
-            z = current[i] + gamma * diff + np.random.normal(0, eps, size=dimension)
-
-            # Apply subspace sampling using the crossover probability CR
-            crossover_mask = np.random.rand(dimension) < CR
-            z = np.where(crossover_mask, z, current[i])
-
-            # Ensure that the proposal does not diverge too far
-            # Clip values or reflect within a reasonable range if necessary
-            max_bound = 1e10
-            min_bound = -1e10
-            z = np.clip(z, min_bound, max_bound)
-
-            return z
-
-        def outlier_detection_step(prob_history, prob, current, chains):
-            """
-            Detect and correct outlier chains based on the log posterior values.
-
-            Parameters:
-            - prob_history (np.ndarray): Log posterior values for all chains.
-            - prob (np.ndarray): Log posterior values for the current generation.
-            - current (np.ndarray): Current states of all chains.
-            - chains (int): Number of chains.
-
-            Returns:
-            - current (np.ndarray): Corrected states of all chains.
-            - prob (np.ndarray): Corrected log posterior values for the current generation
-            """
-
-            prob_mean = np.mean(prob_history)
-            prob_std = np.std(prob_history)
-            outliers = np.abs(prob - prob_mean) > 2 * prob_std
-            for i in np.where(outliers)[0]:
-                chain = [np.argmax(prob)]  # Currently best chain
-                if np.random.rand() > prob[chain]:
-                    chain = np.random.choice([x for x in range(chains) if x != i])  # Random chain
-                current[i] = current[np.argmax(prob_mean)]
-                prob[i] = prob[np.argmax(prob_mean)]
-            return current, prob
-        
-        def adapt_crossover_probability(gen, acceptance_rates):
-            """
-            Adapt the crossover probability based on the acceptance rates.
-
-            Parameters:
-            - gen (int): Current generation.
-            - acceptance_rates (np.ndarray): Acceptance rates for all chains.
-
-            Returns:
-            - CR (float): Adapted crossover probability.
-            """
-            
-            # linearly decrease CR
-            return max(0.3, 1 - gen / 10000)
-
-        for gen in range(N):
-            for i in range(chains):
-                z = differential_evolution_proposal(i, CR, current)
-                prob_z = self.posterior(z)
-
-                alpha = min(1, prob_z / prob[i])
-
-                if np.random.rand() < alpha:
-                    current[i] = z
-                    prob[i] = prob_z
-                    acceptance_counts[i] += 1
-
-            if outlier_detection and gen > history_length:
-                m = max(0, gen - history_length)
-                n = min(N, gen)
-                current, prob = outlier_detection_step(prob_history[m:n], prob, current, chains)
-
-            if adapt_CR and gen < burnin_index:
-                CR = adapt_crossover_probability(gen, acceptance_counts / (gen + 1))
-
-            prob_history[gen] = prob
-            samples[gen] = current
-
-        samples = samples[burnin_index:]  # Remove burn-in samples
-        acceptance_rates = acceptance_counts / N
-        return samples, acceptance_rates
 
     def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = None, max_points: int = 100):
         """
@@ -1311,11 +902,13 @@ class MH(Sampling):
             proposal = np.random.multivariate_normal(current, self.scale_factor * self.C)
             proposal_posterior = self.posterior(proposal)
             if self.log:
-                alpha = np.exp(min(0, proposal_posterior - current_posterior))
+                alpha = min(0, proposal_posterior - current_posterior)
+                u = np.log(np.random.rand())
             else:
                 alpha = min(1, proposal_posterior / current_posterior)
+                u = np.random.rand()
             # Accept the proposal with probability alpha
-            if np.random.rand() < alpha: 
+            if u < alpha: 
                 current = proposal  
                 current_posterior = proposal_posterior
                 if t >= burnin_index:
@@ -1415,11 +1008,13 @@ class AM(Sampling):
             proposal = np.random.multivariate_normal(current, self.scale_factor * self.C[-1])
             proposal_posterior = self.posterior(proposal)
             if self.log:
-                alpha = np.exp(min(0, proposal_posterior - current_posterior))
+                alpha = min(0, proposal_posterior - current_posterior)
+                u = np.log(np.random.rand())
             else:
                 alpha = min(1, proposal_posterior / current_posterior)
+                u = np.random.rand()
             # Accept the proposal with probability alpha
-            if np.random.rand() < alpha:
+            if u < alpha:
                 current = proposal  
                 current_posterior = proposal_posterior
                 if t >= burnin_index:
@@ -1573,11 +1168,13 @@ class DRAM(Sampling):
 
                 # Calculate acceptance probability for the current stage
                 if self.log:
-                    alpha = np.exp(self._acceptance_probability(stage_posterior=stage_posterior))
+                    alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                    u = np.log(np.random.rand())
                 else:
                     alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                    u = np.random.rand()
                 # Accept the proposal with probability alpha
-                if np.random.rand() < alpha:
+                if u < alpha:
                     current = proposal
                     current_posterior = proposal_posterior
                     if t >= burnin_index:
@@ -1675,7 +1272,9 @@ class DREAM(Sampling):
         proposal_point = current[chain].copy()
         num_pairs = np.random.randint(1, self.max_pairs + 1)
 
-        for i in range(self.dimension):
+        randomized_dimensions = np.random.permutation(self.dimension)
+
+        for i in randomized_dimensions:
             if np.random.rand() < CR:
                 if gen % 5 == 0:
                     gamma = 1.0
@@ -1684,12 +1283,12 @@ class DREAM(Sampling):
 
                 diff = 0
                 for _ in range(num_pairs):
-                    indices = np.random.choice(self.dimension, 2, replace=False)
+                    indices = np.random.choice([x for x in range(self.chains) if x != chain] ,self.dimension, replace=False)
                     diff += current[indices[0]][i] - current[indices[1]][i]
 
                 e = np.random.uniform(-self.eps, self.eps)
-                eps = np.random.uniform(0, self.eps)
-                proposal_point[i] = current[chain][i] + (np.eye(self.dimension) + e) * (gamma * diff) + eps
+                eps = np.random.normal(0, self.eps)
+                proposal_point[i] = current[chain][i] + (1 + e) * (gamma * diff) + eps
             else:
                 d -= 1
 
@@ -1831,11 +1430,13 @@ class DREAM(Sampling):
                     stage_posterior.append(proposal_posterior[chain])
 
                     if self.log:
-                        alpha = np.exp(self._acceptance_probability(stage_posterior=stage_posterior))
+                        alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                        u = np.log(np.random.rand())
                     else:
                         alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                        u = np.random.rand()
                     # Accept the proposal with probability alpha
-                    if np.random.rand() < alpha:
+                    if u < alpha:
                         current_posterior[chain] = proposal_posterior[chain]
                         if gen >= burnin_index:
                             self.acc[chain, stage, 1] += 1
