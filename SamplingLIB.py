@@ -1218,6 +1218,7 @@ class DREAM(Sampling):
         self.outlier_threshold = 2.0
         self.outlier_detection = outlier_detection
         self.num_stages = num_stages  # Number of delayed rejection stages
+        self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)]  # Scaling factors for each proposal stage
         self.eps = eps
         self.samples = None
         self.acc = None
@@ -1228,9 +1229,9 @@ class DREAM(Sampling):
 
         # Initialize CR probabilities
         self.nCR = nCR # Number of crossover probabilities to explore
-        self.p_m = np.ones(nCR) / nCR  # Equal probability for each crossover probability
-        self.L_m = np.zeros(nCR)  # Counts of accepted proposals for each CR value
-        self.Delta_m = np.zeros(nCR)  # Sum of squared jumping distances for each CR value
+        self.p_a = np.ones(nCR) / nCR  # Equal probability for each crossover probability
+        self.h_a = np.zeros(nCR)  # Counts of usage for each CR value
+        self.Delta_a = np.zeros(nCR)  # Sum of squared jumping distances for each CR value
 
     def _initialize_population(self):
         """
@@ -1255,7 +1256,7 @@ class DREAM(Sampling):
 
         return initial
 
-    def _propose_point(self, current, chain, gen, CR):
+    def _propose_point(self, current, chain, gen, CR, stage):
         """
         Generates a candidate point for the given chain using differential evolution.
 
@@ -1263,6 +1264,8 @@ class DREAM(Sampling):
         - current: Current population of points.
         - chain: Index of the chain to generate a proposal for.
         - gen: Current generation number.
+        - CR: Crossover probability for the proposal.
+        - stage: Current proposal stage.
 
         Returns:
         - proposal_point: Proposed point for the given chain
@@ -1277,9 +1280,9 @@ class DREAM(Sampling):
         for i in randomized_dimensions:
             if np.random.rand() < CR:
                 if gen % 5 == 0:
-                    gamma = 1.0
+                    beta = 1.0
                 else:
-                    gamma = self.scale_factor / np.sqrt(2*num_pairs*d)
+                    beta = self.scale_factor / np.sqrt(2*num_pairs*d)
 
                 diff = 0
                 for _ in range(num_pairs):
@@ -1288,7 +1291,7 @@ class DREAM(Sampling):
 
                 e = np.random.uniform(-self.eps, self.eps)
                 eps = np.random.normal(0, self.eps)
-                proposal_point[i] = current[chain][i] + (1 + e) * (gamma * diff) + eps
+                proposal_point[i] = current[chain][i] + ((1 + e) * (beta * diff) * self.gammas[stage]) + eps
             else:
                 d -= 1
 
@@ -1420,12 +1423,12 @@ class DREAM(Sampling):
                     if gen >= burnin_index:
                         self.acc[chain, stage, 0] += 1
                     # Sample crossover probability CR = m / nCR
-                    m = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_m)
-                    CR = m / self.nCR
-                    self.L_m[m - 1] += 1  # Count usage of this CR value
+                    a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_m)
+                    CR = a / self.nCR
+                    self.h_a[a - 1] += 1  # Count usage of this CR value
 
                     # Proposal generation using differential evolution
-                    proposal[chain] = self._propose_point(current, chain, gen, CR)
+                    proposal[chain] = self._propose_point(current, chain, gen, CR, stage)
                     proposal_posterior[chain] = self.posterior(proposal[chain])
                     stage_posterior.append(proposal_posterior[chain])
 
@@ -1443,7 +1446,7 @@ class DREAM(Sampling):
 
                         # Calculate the squared jumping distance ∆m
                         delta_m = np.sum(((proposal[chain] - current[chain]) / np.std(proposal, axis=0)) ** 2)
-                        self.Delta_m[m - 1] += delta_m
+                        self.Delta_a[a - 1] += delta_m
                         break
                     else:
                         proposal[chain] = current[chain]
@@ -1458,9 +1461,9 @@ class DREAM(Sampling):
             
             if gen == (burnin_index - 1):
                 # Update the probabilities p_m based on ∆m
-                total_Delta = np.sum(self.Delta_m / self.L_m)
-                for m in range(self.nCR):
-                    self.p_m[m] = (self.Delta_m[m] / self.L_m[m]) / total_Delta if (total_Delta > 0 and self.L_m[m] > 0) else self.p_m[m]
+                total_Delta = np.sum(self.Delta_a / self.h_a)
+                for a in range(self.nCR):
+                    self.p_a[a] = (self.Delta_a[a] / self.h_a[a]) / total_Delta if (total_Delta > 0 and self.h_a[a] > 0) else self.p_a[a]
 
         self.acc_rate = self.acc[:, :, 1] / self.acc[:, :, 0]
         self._compute_gelman_rubin()
