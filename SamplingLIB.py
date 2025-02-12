@@ -1412,7 +1412,8 @@ class DREAM(Sampling):
         self.acc = np.zeros((self.chains, self.num_stages, 2))
 
         for gen in range(N + burnin_index):
-            proposal = np.zeros((self.chains, self.dimension))
+            #proposal = np.zeros((self.chains, self.dimension))
+            proposal = current.copy()
             proposal_posterior = np.zeros(self.chains)
 
             for chain in range(self.chains):
@@ -1423,7 +1424,7 @@ class DREAM(Sampling):
                     if gen >= burnin_index:
                         self.acc[chain, stage, 0] += 1
                     # Sample crossover probability CR = m / nCR
-                    a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_m)
+                    a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_a)
                     CR = a / self.nCR
                     self.h_a[a - 1] += 1  # Count usage of this CR value
 
