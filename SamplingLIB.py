@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.stats import multivariate_normal
+from scipy.special import logsumexp
 from typing import Callable
 import matplotlib.animation as animation
 from scipy.stats import gaussian_kde, entropy
@@ -10,32 +12,24 @@ class Sampling:
     A class for applying sampling methods on a given posterior function.
 
     Attributes:
-    - posterior (Callable): The posterior function for a given problem.
     - dimension (int): The dimension of the parameter.
+    - posterior (Callable): The posterior function for a given problem.
     - likelihood (Callable): The likelihood function for a given problem.
     - forward_model (Callable): The forward model function for a given problem.
     - observed_data (np.ndarray): The observed data for a given problem.
     - noise_std (float): The standard deviation of the noise in the data.
     - prior (Callable): The prior function for a given problem.
     - prior_means (np.ndarray): The means of the prior distribution.
-    - prior_stds (np.ndarray): The standard deviations of the prior distribution.
+    - prior_covs (np.ndarray): The standard deviations of the prior distribution.
     - log (bool): If True, the function returns the log-probability density.
 
     Methods:
-    - __init__(self, posterior: Callable, parametr_dimension: int): Constructor for Sampling class.
-    - visualize(self, samples: np.ndarray): Visualizes the samples based on their dimensionality.
-    - MH(self, N: int = 1000, initial: np.ndarray = None, proposal_distribution: Callable = None, burnin: float = 0): Random walk Metropolis-Hastings algorithm.
-
-    Example usage:
-    ```
-    sampler = Sampling(posterior_function, 2)
-    samples = sampler.MH(N=1000, initial=np.zeros(2), proposal_distribution=np.random.normal, burnin=0.2)
-    sampler.visualize(samples)
-    ```
+    - __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_std=None, 
+               prior=None, prior_means=None, prior_covs=None, log=False): Constructor for Sampling class.
     """
 
-    def __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_std=None, 
-                 prior=None, prior_means=None, prior_stds=None, log=False):
+    def __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_std=None, inv_noise_var=None,
+                 prior=None, prior_means=None, prior_covs=None, weights=None, log=False):
         """
         Constructor for the Sampling class.
 
@@ -44,7 +38,7 @@ class Sampling:
         - posterior (Callable): The posterior function for a given problem.
         - prior (Callable): The prior function for a given problem.
         - prior_means (np.ndarray): The means of the prior distribution.
-        - prior_stds (np.ndarray): The standard deviations of the prior distribution.
+        - prior_covs (np.ndarray): The standard deviations of the prior distribution.
         - likelihood (Callable): The likelihood function for a given problem.
         - forward_model (Callable): The forward model function for a given problem.
         - observed_data (np.ndarray): The observed data for a given problem.
@@ -55,191 +49,86 @@ class Sampling:
         - None
 
         Raises:
-        - None
-
-        Example usage:
-        ```
-        sampler = Sampling(dimension=2, posterior=posterior_function)
-        ```
+        - ValueError: If required parameters for likelihood or prior are not provided.
         """
 
         self.dimension = dimension
         self.log = log
-        self.likelihood = self._setup_likelihood(likelihood, forward_model, observed_data, noise_std, posterior)
-        self.prior = self._setup_prior(prior, prior_means, prior_stds, posterior)
-        self.posterior = self._setup_posterior(posterior)
 
-    def _setup_likelihood(self, likelihood, forward_model, observed_data, noise_std, posterior):
-        """
-        Creates the likelihood of a forward model given the data.
-        
-        Parameters:
-        - forward_model (Callable): Forward model function that takes a point and returns a prediction.
-        - observed_data (np.ndarray): Observed data.
-        - std_dev (float): Standard deviation of the noise in the data.
-        
-        Returns:
-        - float: Likelihood of the forward model given the data.
-        """
-
-        def likelihood_func(point):
-            """
-            Computes the likelihood of the forward model given the data.
-
-            Parameters:
-            - point (np.ndarray): The point at which to evaluate the likelihood.
-
-            Returns:
-            - float: The likelihood of the forward model given the data.
-            """
-
-            y_pred = self.forward_model(point)
-            likelihood = -((self.observed_data - y_pred) ** 2) / (2 * self.noise_std ** 2)
-            if self.log:
-                return likelihood
-            else:
-                return np.exp(likelihood)
-
+        self.likelihood = likelihood
         self.forward_model = forward_model
         self.observed_data = observed_data
         self.noise_std = noise_std
-
-        if (likelihood is None) and (posterior is None):
-            if self.forward_model is None or self.observed_data is None or self.noise_std is None:
-                raise ValueError("`forward_model`, `observed_data`, and `noise_std` are required to set up the likelihood.")
-            return likelihood_func
-        else:
-            return likelihood       
-    
-    def _setup_prior(self, prior, prior_means, prior_stds, posterior):
-        """
-        Creates the prior function.
-
-        Parameters:
-        - prior_means (np.ndarray): The means of the prior distribution.
-        - prior_stds (np.ndarray): The standard deviations of the prior distribution.
-
-        Returns:
-        - function: A function that takes a point and returns the prior probability density.
-        """
-
+        self.inv_noise_var = inv_noise_var
+        self.prior = prior
         self.prior_means = prior_means
-        self.prior_stds = prior_stds
-
-        if (prior is None) and (posterior is None):
-            if (self.prior_means) is None or (self.prior_stds) is None:
-                raise ValueError("`prior_means` and `prior_stds` are required to set up the prior.")
-            if len(self.prior_means) != len(self.prior_stds):
-                raise ValueError("`prior_means` and `prior_stds` must have the same length.")
-
-            return self._create_gaussian_pdf()
-        else:
-            return prior
-
-    def _setup_posterior(self, posterior):
-        """
-        Creates the posterior function for a given point.
-
-        Parameters:
-        - None
-
-        Returns:
-        - function: A function that takes a point and returns the posterior probability density.
-        """
-
-        def posterior_func(point):
-            """
-            Computes the posterior probability density for a given point.
-
-            Parameters:
-            - point (np.ndarray): The point at which to evaluate the posterior.
-
-            Returns:
-            - float: The posterior probability density at the given point.
-            """
-
-            if self.log:
-                return self.likelihood(point) + self.prior(point)
-            else:
-                return self.likelihood(point) * self.prior(point)
+        self.prior_covs = prior_covs
+        self.weights = weights
 
         if posterior is None:
-            if (self.likelihood is None) or (self.prior is None):
-                raise ValueError("`likelihood` and `prior` are required to set up the posterior.")
-            return posterior_func
-        else:
-            return posterior
+            # Likelihood
+            if likelihood is None:
+                if forward_model is None or observed_data is None or noise_std is None:
+                    raise ValueError("`forward_model`, `observed_data`, and `noise_std` are required to set up the likelihood.")
+                else:
+                    self.forward_model = forward_model
+                    self.observed_data = np.asarray(observed_data) if isinstance(observed_data, list) else observed_data
+                    self.noise_std = noise_std
+                    self.inv_noise_var = 1 / (2 * noise_std ** 2) if inv_noise_var is None else inv_noise_var
+                    self.likelihood = self._likelihood_func
+            else:
+                self.likelihood = likelihood
 
-    def _create_gaussian_pdf(self):
+            # Prior
+            if prior is None:
+                if prior_means is None or prior_covs is None:
+                    raise ValueError("`prior_means` and `prior_covs` are required to set up the prior.")
+                else:
+                    self.prior_means = np.asarray(prior_means)
+                    self.prior_covs = np.asarray([np.diag(cov ** 2) if cov.ndim == 1 else cov for cov in np.asarray(prior_covs)])
+                    wghts = np.ones(len(self.prior_means)) / len(self.prior_means) if weights is None else weights / np.sum(weights)
+                    self.weights = np.log(wghts) if self.log else wghts
+                    self.prior = self._combined_gaussian_pdf
+            else:
+                self.prior = prior
+
+            # Posterior
+            self.posterior = lambda x: self.likelihood(x) + self.prior(x) if self.log else self.likelihood(x) * self.prior(x)
+        else:
+            self.posterior = posterior
+
+    def _likelihood_func(self, point):
         """
-        Creates a Gaussian probability density function for a given mean and standard deviation.
+        Computes the likelihood of the forward model given the data.
 
         Parameters:
-        - None
+        - point (np.ndarray): The point at which to evaluate the likelihood.
 
         Returns:
-        - function: A function that takes a point and returns the Gaussian PDF.
-        """  
+        - float: The likelihood of the forward model given the data.
+        """
 
-        def gaussian_pdf(point = None, mean=None, std=None):
-            """
-            Computes the Gaussian probability density function for a given mean and standard deviation.
+        y_pred = self.forward_model(point)
+        diff_squared = np.square(self.observed_data - y_pred)
+        likelihood = -diff_squared * self.inv_noise_var  
 
-            Parameters:
-            - point (np.ndarray): The point at which to evaluate the PDF.
-            - mean (np.ndarray): The mean of the Gaussian distribution.
-            - std (float): The standard deviation of the Gaussian distribution.
+        return likelihood if self.log else np.exp(likelihood)
 
-            Returns:
-            - float: The Gaussian PDF at the given point.
-            """
+    def _combined_gaussian_pdf(self, point):
+        """
+        Computes the combined Gaussian probability density function for multiple means and standard deviations.
 
-            if point is None:
-                point = np.zeros(self.dimension)
-            if mean is None:
-                mean = self.prior_means[0]
-            if std is None:
-                std = self.prior_stds[0]
-            
-            point = np.array(point)
-            mean = np.array(mean)
-            std = np.array(std)
+        Parameters:
+        - point (np.ndarray): The point at which to evaluate the PDF.
 
-            # Construct the covariance matrix with std deviations per dimension
-            inv_covariance = np.diag(1 / (std ** 2))
+        Returns:
+        - float: The combined Gaussian PDF at the given point.
+        """
+        
+        # Compute log-probabilities for each Gaussian component
+        log_probs = np.array([multivariate_normal.logpdf(point, mean=mean, cov=cov) for mean, cov in zip(self.prior_means, self.prior_covs)])
 
-            # Compute the Gaussian PDF in log space
-            pos = point - mean
-            exponent = -0.5 * (np.dot(pos.T, inv_covariance).dot(pos))
-            #normalization_constant_log = -0.5 * self.dimension * np.log(2 * np.pi * std ** 2)
-            pdf = exponent #+ normalization_constant_log
-
-            return pdf if self.log else np.exp(pdf)
-
-        def combined_gaussian_pdf(point):
-            """
-            Computes the combined Gaussian probability density function for multiple means and standard deviations.
-
-            Parameters:
-            - point (np.ndarray): The point at which to evaluate the PDF.
-
-            Returns:
-            - float: The combined Gaussian PDF at the given point.
-            """
-
-            densities = [gaussian_pdf(point, mean, std) for mean, std in zip(self.prior_means, self.prior_stds)]
-
-            if self.log:
-                max_density = np.max(densities)
-                combined_log_density = max_density + np.log(np.sum(np.exp(densities - max_density)))
-                return combined_log_density
-            else:
-                return np.sum(densities)# / len(self.prior_means)
-
-        if len(self.prior_means) > 0:
-            return combined_gaussian_pdf
-        else:
-            raise ValueError("Invalid number of prior means and standard deviations.")
+        return np.sum(self.weights + log_probs) if self.log else np.dot(self.weights, np.exp(log_probs))
 
     def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = None, max_points: int = 100):
         """
@@ -774,7 +663,7 @@ class Sampling:
         # Return KL Divergence value
         return kl_divergence
     
-    def optimalize(self, method: str = None, parametrs: list = [], parametr: str = None, range: tuple = None, metric: str = 'time'):
+    def optimize(self, method: str = None, parametrs: list = [], parametr: str = None, range: tuple = None, metric: str = 'time'):
         # this function will find the most optimal value for a given parametr, according to the chosen metric
         parametr_values = np.linsapce(range[0], range[1], 100)
         results = []
@@ -839,7 +728,7 @@ class MH(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2):
+    def __init__(self, distribution, prop_dist=None, initial_cov=None, scale_factor=None, burnin=0.2):
         """
         Initialize the Random Walk Metropolis algorithm.
 
@@ -858,6 +747,7 @@ class MH(Sampling):
         self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
         self.mean = np.zeros(self.dimension)
         self.burnin = burnin
+        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
         self.C = np.eye(self.dimension) if initial_cov is None else initial_cov
         self.acc_rate = None
         self.samples = None
@@ -870,12 +760,11 @@ class MH(Sampling):
         - np.ndarray: Initial sample.
         """
         
-        if (self.prior_means is None) or (self.prior_stds is None):
+        if (self.prior_means is None) or (self.prior_covs is None):
             initial = np.random.randn(self.dimension)
         else:
-            num_modes = len(self.prior_means)
-            mode_idx = np.random.choice(num_modes)
-            initial = [np.random.normal(mean, std) for mean, std in zip(self.prior_means[mode_idx], self.prior_stds[mode_idx])]
+            mode_idx = np.random.choice(len(self.prior_means))
+            initial = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
         return np.array(initial)
 
@@ -899,7 +788,8 @@ class MH(Sampling):
         
         for t in range(N + burnin_index):
             # Propose a new point
-            proposal = np.random.multivariate_normal(current, self.scale_factor * self.C)
+            #proposal = np.random.multivariate_normal(current, self.scale_factor * self.C)
+            proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.C)
             proposal_posterior = self.posterior(proposal)
             if self.log:
                 alpha = min(0, proposal_posterior - current_posterior)
@@ -942,7 +832,7 @@ class AM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2, eps=1e-5, update_step=1):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, prop_dist=None, burnin=0.2, eps=1e-5, update_step=1):
         """
         Initialize the Adaptive Metropolis algorithm.
 
@@ -964,6 +854,7 @@ class AM(Sampling):
         self.mean = np.zeros(self.dimension)
         self.burnin = burnin
         self.update_step = update_step
+        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
         self.C = [np.eye(self.dimension)] if initial_cov is None else [initial_cov]
         self.acc_rate = None
         self.samples = None
@@ -976,12 +867,11 @@ class AM(Sampling):
         - np.ndarray: Initial sample.
         """
         
-        if (self.prior_means is None) or (self.prior_stds is None):
+        if (self.prior_means is None) or (self.prior_covs is None):
             initial = np.random.randn(self.dimension)
         else:
-            num_modes = len(self.prior_means)
-            mode_idx = np.random.choice(num_modes)
-            initial = [np.random.normal(mean, std) for mean, std in zip(self.prior_means[mode_idx], self.prior_stds[mode_idx])]
+            mode_idx = np.random.choice(len(self.prior_means))
+            initial = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
         return np.array(initial)    
 
@@ -1005,7 +895,8 @@ class AM(Sampling):
         
         for t in range(N + burnin_index):
             # Propose a new point
-            proposal = np.random.multivariate_normal(current, self.scale_factor * self.C[-1])
+            #proposal = np.random.multivariate_normal(current, self.scale_factor * self.C[-1])
+            proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.C[-1])
             proposal_posterior = self.posterior(proposal)
             if self.log:
                 alpha = min(0, proposal_posterior - current_posterior)
@@ -1055,17 +946,20 @@ class DRAM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2, eps=1e-5, update_step=1, gammas=None, num_stages=3):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, prop_dist=None, burnin=0.2, eps=1e-5, update_step=1, gammas=None, num_stages=3):
         """
         DRAM initialization.
         
         Parameters:
         - posterior: Posterior distribution function.
         - dimension: Number of dimensions for the parameter space.
-        - scaling_factor: Scaling factor for the proposal covariance matrix.
+        - scale_factor: Scaling factor for the proposal covariance matrix.
+        - initial_cov: Initial covariance matrix for the proposal distribution.
+        - prop_dist: Proposal distribution to use for sampling.
         - gammas: List of scaling factors for each proposal stage. Default: [1.0, 0.5] (for 2 stages).
         - epsilon: Regularization term to avoid singular matrices.
-        - n0: Number of initial iterations before adaptation starts.
+        - burnin: Fraction of the total number of samples to discard as burn-in.
+        - update_step: Number of samples between covariance matrix updates.
         - num_stages: Number of proposal stages for delayed rejection.
         """
 
@@ -1080,6 +974,7 @@ class DRAM(Sampling):
         self.update_step = update_step  # Update covariance matrix every n samples
         self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)] if gammas is None else gammas
         self.C = [np.eye(self.dimension)] if initial_cov is None else [initial_cov] # list of covariance matrices
+        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
         self.samples = None  # To store past samples
         self.mean = np.zeros(self.dimension)  # Mean of the samples
         self.acc = None  # Count of accepted samples
@@ -1093,16 +988,15 @@ class DRAM(Sampling):
         - np.ndarray: Initial sample.
         """
         
-        if (self.prior_means is None) or (self.prior_stds is None):
+        if (self.prior_means is None) or (self.prior_covs is None):
             initial = np.random.randn(self.dimension)
         else:
-            num_modes = len(self.prior_means)
-            mode_idx = np.random.choice(num_modes)
-            initial = [np.random.normal(mean, std) for mean, std in zip(self.prior_means[mode_idx], self.prior_stds[mode_idx])]
+            mode_idx = np.random.choice(len(self.prior_means))
+            initial = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
         return np.array(initial)
 
-    def _acceptance_probability(self, stage_posterior):
+    def _acceptance_probability(self, stage_posterior, proposals):
         """
         Calculate the acceptance probability for a given likelihood history.
         
@@ -1113,27 +1007,35 @@ class DRAM(Sampling):
         - alpha: Acceptance probability for the likelihood history.
         """
 
+        stage = len(stage_posterior) - 2
+
         if self.log:
             alpha = (stage_posterior[-1] - stage_posterior[0]) if stage_posterior[0] > -np.inf else 0.0
-            numerator = 0.0
-            denominator = 0.0
+            numerator_alpha = 0.0
+            denominator_alpha = 0.0
         else:
             alpha = (stage_posterior[-1] / stage_posterior[0]) if stage_posterior[0] > 0 else 1.0
-            numerator = 1.0
-            denominator = 1.0
+            numerator_alpha = 1.0
+            denominator_alpha = 1.0
 
-        for i in range(len(stage_posterior) - 2, 0, -1):
+        for i in range(stage, 0, -1):
             if self.log:
-                numerator += np.log1p(-np.exp(self._acceptance_probability(stage_posterior[i:][::-1])))
-                denominator += np.log1p(-np.exp(self._acceptance_probability(stage_posterior[:len(stage_posterior) - i])))
+                numerator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
+                numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1])))
+
+                denominator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
+                denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i])))
             else:
-                numerator *= (1 - self._acceptance_probability(stage_posterior[i:][::-1]))
-                denominator *= (1 - self._acceptance_probability(stage_posterior[:len(stage_posterior) - i]))
+                numerator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1]))
+
+                denominator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i]))
         
         if self.log:
-            alpha += (numerator - denominator) if denominator > -np.inf else 0.0
+            alpha += (numerator_alpha - denominator_alpha) if denominator_alpha > -np.inf else 0.0
         else:
-            alpha *= (numerator / denominator) if denominator > 0 else 1.0
+            alpha *= (numerator_alpha / denominator_alpha) if denominator_alpha > 0 else 1.0
         
         return min(0, alpha) if self.log else min(1, alpha)
 
@@ -1157,21 +1059,24 @@ class DRAM(Sampling):
 
         for t in range(N + burnin_index):
             stage_posterior = [current_posterior]
+            proposals = [current]
             for stage in range(self.num_stages):
                 if t >= burnin_index:
                     self.acc[stage, 0] += 1
 
                 # Propose a new point for the current stage
-                proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage] * self.C[-1])
+                # proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage] * self.C[-1])
+                proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.gammas[stage] * self.C[-1])
                 proposal_posterior = self.posterior(proposal)
+                proposals.append(proposal)
                 stage_posterior.append(proposal_posterior)
 
                 # Calculate acceptance probability for the current stage
                 if self.log:
-                    alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                    alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
                     u = np.log(np.random.rand())
                 else:
-                    alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                    alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
                     u = np.random.rand()
                 # Accept the proposal with probability alpha
                 if u < alpha:
@@ -1193,7 +1098,7 @@ class DRAM(Sampling):
         self.acc_rate = self.acc[:, 1] / self.acc[:, 0]
 
 class DREAM(Sampling):
-    def __init__(self, distribution, chains=None, scale_factor=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, num_stages=3, outlier_detection=True):
+    def __init__(self, distribution, chains=None, scale_factor=None, prop_dist=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, num_stages=3, outlier_detection=True):
         """
         Initializes the DREAM sampling algorithm.
         
@@ -1241,7 +1146,7 @@ class DREAM(Sampling):
         - initial: Initial population of points for the chains.
         """
         
-        if (self.prior_means is None) or (self.prior_stds is None):
+        if (self.prior_means is None) or (self.prior_covs is None):
             initial = np.random.randn(self.chains, self.dimension)
         else:
             num_modes = len(self.prior_means)
@@ -1249,10 +1154,7 @@ class DREAM(Sampling):
 
             for chain in range(self.chains):
                 mode_idx = np.random.choice(num_modes)
-
-                initial_point = [np.random.normal(mean, std) for mean, std in zip(self.prior_means[mode_idx], self.prior_stds[mode_idx])]
-
-                initial[chain] = initial_point
+                initial[chain] = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
         return initial
 
@@ -1286,7 +1188,7 @@ class DREAM(Sampling):
 
                 diff = 0
                 for _ in range(num_pairs):
-                    indices = np.random.choice([x for x in range(self.chains) if x != chain] ,self.dimension, replace=False)
+                    indices = np.random.choice([x for x in range(self.chains) if x != chain] , 2, replace=False)
                     diff += current[indices[0]][i] - current[indices[1]][i]
 
                 e = np.random.uniform(-self.eps, self.eps)
@@ -1297,38 +1199,46 @@ class DREAM(Sampling):
 
         return proposal_point
 
-    def _acceptance_probability(self, stage_posterior):
+    def _acceptance_probability(self, stage_posterior, proposals):
         """
-        Calculate the acceptance probability for a given posterior history.
+        Calculate the acceptance probability for a given likelihood history.
         
         Parameters:
-        - stage_posterior: Posterior history in each stage for the current chain.
+        - lh: Likelihood history for the current stage.
 
         Returns:
-        - alpha: Acceptance probability for the posterior history in each stage.
+        - alpha: Acceptance probability for the likelihood history.
         """
+
+        stage = len(stage_posterior) - 2
 
         if self.log:
             alpha = (stage_posterior[-1] - stage_posterior[0]) if stage_posterior[0] > -np.inf else 0.0
-            numerator = 0.0
-            denominator = 0.0
+            numerator_alpha = 0.0
+            denominator_alpha = 0.0
         else:
             alpha = (stage_posterior[-1] / stage_posterior[0]) if stage_posterior[0] > 0 else 1.0
-            numerator = 1.0
-            denominator = 1.0
+            numerator_alpha = 1.0
+            denominator_alpha = 1.0
 
-        for i in range(len(stage_posterior) - 2, 0, -1):
+        for i in range(stage, 0, -1):
             if self.log:
-                numerator += np.log1p(-np.exp(self._acceptance_probability(stage_posterior[i:][::-1])))
-                denominator += np.log1p(-np.exp(self._acceptance_probability(stage_posterior[:len(stage_posterior) - i])))
+                #numerator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
+                numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1])))
+
+                #denominator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
+                denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i])))
             else:
-                numerator *= (1 - self._acceptance_probability(stage_posterior[i:][::-1]))
-                denominator *= (1 - self._acceptance_probability(stage_posterior[:len(stage_posterior) - i]))
+                #numerator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1]))
+
+                #denominator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i]))
         
         if self.log:
-            alpha += (numerator - denominator) if denominator > -np.inf else 0.0
+            alpha += (numerator_alpha - denominator_alpha) if denominator_alpha > -np.inf else 0.0
         else:
-            alpha *= (numerator / denominator) if denominator > 0 else 1.0
+            alpha *= (numerator_alpha / denominator_alpha) if denominator_alpha > 0 else 1.0
         
         return min(0, alpha) if self.log else min(1, alpha)
 
@@ -1419,6 +1329,7 @@ class DREAM(Sampling):
             for chain in range(self.chains):
                 # Initialize stage_posterior for the current chain
                 stage_posterior = [current_posterior[chain]]
+                proposals = [current[chain]]
 
                 for stage in range(self.num_stages):
                     if gen >= burnin_index:
@@ -1431,13 +1342,14 @@ class DREAM(Sampling):
                     # Proposal generation using differential evolution
                     proposal[chain] = self._propose_point(current, chain, gen, CR, stage)
                     proposal_posterior[chain] = self.posterior(proposal[chain])
+                    proposals.append(proposal[chain])
                     stage_posterior.append(proposal_posterior[chain])
 
                     if self.log:
-                        alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                        alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
                         u = np.log(np.random.rand())
                     else:
-                        alpha = self._acceptance_probability(stage_posterior=stage_posterior)
+                        alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
                         u = np.random.rand()
                     # Accept the proposal with probability alpha
                     if u < alpha:
