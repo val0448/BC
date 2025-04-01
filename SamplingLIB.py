@@ -4,8 +4,11 @@ from scipy.stats import multivariate_normal
 from scipy.special import logsumexp
 from typing import Callable
 import matplotlib.animation as animation
+from matplotlib.colors import to_hex
 from scipy.stats import gaussian_kde, entropy
 from IPython.display import HTML
+import arviz as az
+import pandas as pd
 
 class Sampling:
     """
@@ -17,19 +20,19 @@ class Sampling:
     - likelihood (Callable): The likelihood function for a given problem.
     - forward_model (Callable): The forward model function for a given problem.
     - observed_data (np.ndarray): The observed data for a given problem.
-    - noise_std (float): The standard deviation of the noise in the data.
+    - noise_cov (float): The standard deviation of the noise in the data.
     - prior (Callable): The prior function for a given problem.
     - prior_means (np.ndarray): The means of the prior distribution.
     - prior_covs (np.ndarray): The standard deviations of the prior distribution.
     - log (bool): If True, the function returns the log-probability density.
 
     Methods:
-    - __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_std=None, 
+    - __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_cov=None, 
                prior=None, prior_means=None, prior_covs=None, log=False): Constructor for Sampling class.
     """
 
-    def __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_std=None, inv_noise_var=None,
-                 prior=None, prior_means=None, prior_covs=None, weights=None, log=False):
+    def __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_cov=None,
+                 prior=None, prior_means=None, prior_covs=None, weights=None, kde=None, samples=None, log=False):
         """
         Constructor for the Sampling class.
 
@@ -42,7 +45,7 @@ class Sampling:
         - likelihood (Callable): The likelihood function for a given problem.
         - forward_model (Callable): The forward model function for a given problem.
         - observed_data (np.ndarray): The observed data for a given problem.
-        - noise_std (float): The standard deviation of the noise in the data.
+        - noise_cov (float): The standard deviation of the noise in the data.
         - log (bool): If True, the function returns the log-probability density.
 
         Returns:
@@ -58,8 +61,7 @@ class Sampling:
         self.likelihood = likelihood
         self.forward_model = forward_model
         self.observed_data = observed_data
-        self.noise_std = noise_std
-        self.inv_noise_var = inv_noise_var
+        self.noise_cov = noise_cov
         self.prior = prior
         self.prior_means = prior_means
         self.prior_covs = prior_covs
@@ -68,13 +70,12 @@ class Sampling:
         if posterior is None:
             # Likelihood
             if likelihood is None:
-                if forward_model is None or observed_data is None or noise_std is None:
-                    raise ValueError("`forward_model`, `observed_data`, and `noise_std` are required to set up the likelihood.")
+                if forward_model is None or observed_data is None or noise_cov is None:
+                    raise ValueError("`forward_model`, `observed_data`, and `noise_cov` are required to set up the likelihood.")
                 else:
                     self.forward_model = forward_model
                     self.observed_data = np.asarray(observed_data) if isinstance(observed_data, list) else observed_data
-                    self.noise_std = noise_std
-                    self.inv_noise_var = 1 / (2 * noise_std ** 2) if inv_noise_var is None else inv_noise_var
+                    self.noise_cov = noise_cov
                     self.likelihood = self._likelihood_func
             else:
                 self.likelihood = likelihood
@@ -88,7 +89,7 @@ class Sampling:
                     self.prior_covs = np.asarray([np.diag(cov ** 2) if cov.ndim == 1 else cov for cov in np.asarray(prior_covs)])
                     wghts = np.ones(len(self.prior_means)) / len(self.prior_means) if weights is None else weights / np.sum(weights)
                     self.weights = np.log(wghts) if self.log else wghts
-                    self.prior = self._combined_gaussian_pdf
+                    self.prior = self._gaussian_mixture_pdf
             else:
                 self.prior = prior
 
@@ -96,6 +97,9 @@ class Sampling:
             self.posterior = lambda x: self.likelihood(x) + self.prior(x) if self.log else self.likelihood(x) * self.prior(x)
         else:
             self.posterior = posterior
+
+        self.kde = kde  # Placeholder for KDE approximation
+        self.samples = samples  # Placeholder for generated samples
 
     def _likelihood_func(self, point):
         """
@@ -109,12 +113,11 @@ class Sampling:
         """
 
         y_pred = self.forward_model(point)
-        diff_squared = np.square(self.observed_data - y_pred)
-        likelihood = -diff_squared * self.inv_noise_var  
+        likelihood = multivariate_normal.logpdf(self.observed_data - y_pred, cov=self.noise_cov)
 
         return likelihood if self.log else np.exp(likelihood)
 
-    def _combined_gaussian_pdf(self, point):
+    def _gaussian_mixture_pdf(self, point):
         """
         Computes the combined Gaussian probability density function for multiple means and standard deviations.
 
@@ -128,9 +131,9 @@ class Sampling:
         # Compute log-probabilities for each Gaussian component
         log_probs = np.array([multivariate_normal.logpdf(point, mean=mean, cov=cov) for mean, cov in zip(self.prior_means, self.prior_covs)])
 
-        return np.sum(self.weights + log_probs) if self.log else np.dot(self.weights, np.exp(log_probs))
+        return logsumexp(log_probs + self.weights) if self.log else np.sum(np.dot(self.weights, np.exp(log_probs)))
 
-    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = None, max_points: int = 100):
+    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = [], max_points: int = 50):
         """
         Visualizes the samples based on their dimensionality, and compares to posterior.
 
@@ -150,51 +153,36 @@ class Sampling:
         ```
         """
 
-        # visuals_map = {"prior": self.prior, 
-        #                "posterior": self.posterior, 
-        #                "likelihood": self.likelihood, 
-        #                "forward_model": self.forward_model, 
-        #                "samples": self.samples, 
-        #                "kde": self.kde}
+        visuals_map = {"prior": [self.prior, self.visualize_posterior],
+                       "posterior": [self.posterior, self.visualize_posterior],
+                       "likelihood": [self.likelihood, self.visualize_posterior],
+                       "forward_model": [self.forward_model, self.visualize_posterior],
+                       "kde": [self.kde, self.visualize_kde],
+                       "samples_hist": [self.samples, self.visualize_samples_hist],
+                       "samples_scatter": [self.samples, self.visualize_samples_scatter],
+                       "samples_trace": [self.samples, self.visualize_samples_trace],
+                       "samples_acf": [self.samples, self.visualize_samples_acf]}
 
-        if visuals == []:
-            visuals = [self.posterior]
-
-        # Determine how many axes are required:
-        num_axes = sum(2 if (isinstance(visual, np.ndarray) and self.dimension < 3) else 1 for visual in visuals)
-
-        # Create subplots based on the required number of axes
-        fig, axes = plt.subplots(1, num_axes, figsize=(min(18, 6*num_axes), 6))
-
-        # If only one axis is required, make axes iterable
-        if num_axes == 1:
-            axes = [axes]
-
+        visuals = ["posterior"] if visuals == [] else visuals
+        fig, axes = plt.subplots(1, len(visuals), figsize=(5*len(visuals), 5))
+        axes = [axes] if len(visuals) == 1 else axes
         axis_iter = iter(axes)  # Create an iterator over axes
 
         for visual in visuals:
-            if isinstance(visual, np.ndarray):
-                if grid is None:
-                    # Create grid for posterior and histogram comparisons
-                    grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points//2)
-                # Visualize samples in histograms and scatter plots (2 separate plots)
-                self.visualize_samples_hist(visual, grid, ax=next(axis_iter), show = False)
-                if self.dimension < 3:
-                    self.visualize_samples_scatter(visual, ax=next(axis_iter), show = False)
-            elif isinstance(visual, dict) and visual.get("is_kde"):
-                # If it's a KDE approximation
-                self.visualize_kde(visual['data'], grid, ax=next(axis_iter))
-            elif callable(visual):
-                if grid is None:
-                    # Create grid for posterior and histogram comparisons
-                    grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points)
-                # Visualize the posterior (1 plot)
-                self.visualize_posterior(visual, grid, ax=next(axis_iter), show = False)
-
+            if visual in visuals_map and visuals_map[visual][0] is not None:
+                obj, plot_func = visuals_map[visual]
+                if visual not in ["samples_scatter", "samples_trace", "samples_acf"]:
+                    if grid is None:
+                        grid = self.create_grid(visual=obj, ranges=ranges, max_points=max_points)                    
+                    plot_func(visual=obj, grid=grid, title=visual, ax=next(axis_iter), show=False)
+                else:
+                    plot_func(visual=obj, title=visual, ax=next(axis_iter), show=False)
+            else:
+                raise ValueError(f"Unsupported visual: {visual}") if visual not in visuals_map else ValueError(f"Visual {visual} is None.")
         plt.tight_layout()
         plt.show()
 
-    def visualize_samples_hist(self, samples: np.ndarray, grid: tuple = None, ax = None, show = True):
+    def visualize_samples_hist(self, visual: np.ndarray, grid: tuple = None, title="Sample histogram", ax = None, show = True):
         """
         Visualizes histograms for the samples based on their dimensionality.
         
@@ -214,54 +202,49 @@ class Sampling:
         ```
         """
 
-        dimension = samples.shape[-1]
-
         # Check if samples come from multiple chains
-        if samples.ndim == 3:
-            samples = samples.transpose(1, 0, 2).reshape(-1, dimension)
-        elif samples.ndim > 3:
+        if visual.ndim == 3:
+            visual = visual.transpose(1, 0, 2).reshape(-1, self.dimension)
+        elif visual.ndim > 3:
             raise ValueError("Samples array must be 2D or 3D")
 
         # Create a grid if not provided
-        if grid is None:
-            grid = self.create_grid(visual=samples)
+        grid = self.create_grid(visual=visual) if grid is None else grid
 
         # Create an axis if not provided
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+        fig, ax = (plt.subplots(figsize=(6, 6)) if ax is None else (None, ax))
+        ax.set_title(title)
 
-        if dimension == 1:
+        if self.dimension == 1:
             # 1D histogram
-            ax.hist(samples[:, 0], bins=grid[2][0], alpha=0.5)
+            ax.hist(visual[:, 0], bins=grid[2][0], alpha=0.5)
             ax.set_xlabel('u')
             ax.set_ylabel('Density')
 
-        elif dimension == 2:
+        elif self.dimension == 2:
             # 2D histogram
-            ax.hist2d(samples[:, 0], samples[:, 1], bins=grid[2][:2], range=[grid[1][0], grid[1][1]])
+            ax.hist2d(visual[:, 0], visual[:, 1], bins=grid[2][:2], range=[grid[1][0], grid[1][1]])
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('$u_2$')
 
         else:
             # N-dimensional Case: Use pairplots
-            for i in range(dimension):
-                for j in range(dimension):
+            for i in range(self.dimension):
+                for j in range(self.dimension):
                     if i == j:
                         # Diagonal: 1D histogram for individual dimensions
-                        ax[i, j].hist(samples[:, i], bins=grid[2][i], alpha=0.5)
+                        ax[i, j].hist(visual[:, i], bins=grid[2][i], alpha=0.5)
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                     else:
                         # Off-diagonal: 2D scatter or density plot
-                        ax[i, j].scatter(samples[:, i], samples[:, j], s=5, alpha=0.5)
+                        ax[i, j].scatter(visual[:, i], visual[:, j], s=5, alpha=0.5)
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                         ax[i, j].set_ylabel(f'$u_{j+1}$')
-
             plt.tight_layout()
-
         if show:
             plt.show()
 
-    def visualize_samples_scatter(self, samples: np.ndarray, ax = None, show = True):
+    def visualize_samples_scatter(self, visual: np.ndarray, title="Sample scatter", ax = None, show = True):
         """
         Visualizes 1D or 2D scatter plots for samples.
         
@@ -281,29 +264,28 @@ class Sampling:
         """
 
         # Check if samples come from multiple chains
-        if samples.ndim == 3:
-            N_gen, N_chains, dimension = samples.shape
-        elif samples.ndim == 2:
-            N_gen, dimension = samples.shape
+        if visual.ndim == 3:
+            N_gen, N_chains, dimension = visual.shape
+        elif visual.ndim == 2:
+            N_gen, dimension = visual.shape
             N_chains = 1  # Single chain
         else:
             raise ValueError("Samples array must be 2D or 3D")
 
         # Create an axis if not provided
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+        fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax)
+        ax.set_title(title)
 
         if dimension == 1:
             # 1D scatter plot: Plot samples against their index
             if N_chains > 1:
                 colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(range(N_gen), samples[:, chain, 0], '.', color=color, label=f'Chain {chain+1}')
+                    ax.plot(range(N_gen), visual[:, chain, 0], '.', color=color, label=f'Chain {chain+1}')
             else:
-                ax.plot(range(N_gen), samples[:, 0], '.', alpha=0.5)
+                ax.plot(range(N_gen), visual[:, 0], '.', alpha=0.5)
             ax.set_xlabel('Sample Index')
             ax.set_ylabel('$u_1$')
-            ax.set_title('1D Scatter Plot')
             if N_chains > 1:
                 ax.legend(loc='upper right')
 
@@ -312,22 +294,20 @@ class Sampling:
             if N_chains > 1:
                 colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(samples[:, chain, 0], samples[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
+                    ax.plot(visual[:, chain, 0], visual[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
             else:
-                ax.plot(samples[:, 0], samples[:, 1], '.', alpha=0.5)
+                ax.plot(visual[:, 0], visual[:, 1], '.', alpha=0.5)
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('$u_2$')
-            ax.set_title('2D Scatter Plot')
             if N_chains > 1:
                 ax.legend(loc='upper right')
 
         else:
             raise ValueError("This function only handles 1D and 2D cases.")
-
         if show:
             plt.show()
 
-    def visualize_posterior(self, posterior: np.ndarray, grid: tuple = None, ax = None, ranges: list = None, max_points: int = 100 , show = True):
+    def visualize_posterior(self, visual, grid=None, title="Posterior", ax=None, ranges=[], max_points=100 , show=True):
         """
         Visualizes the posterior distribution on a given grid.
         
@@ -349,32 +329,23 @@ class Sampling:
         ```
         """
 
-        # Create a grid if not provided
-        if grid is None:
-            grid = self.create_grid(visual=posterior, ranges=ranges, max_points=max_points)
-
-        # Create an axis if not provided
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6))
+        grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points) if grid is None else grid # Create a grid if not provided
+        fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax) # Create an axis if not provided
+        ax.set_title(title)
 
         # Evaluate posterior on the grid
-        posterior_values = np.array([posterior(point) for point in grid[0]])
-        if self.log:
-            posterior_values = np.exp(posterior_values)  # Convert log posterior to standard form for visualization
+        posterior_values = np.exp(np.array([visual(point) for point in grid[0]])) if self.log else np.array([visual(point) for point in grid[0]])
 
         dimension = grid[0].shape[1]
         if dimension == 1:
             ax.plot(grid[0][:, 0], posterior_values, label='Posterior')
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('Density')
-            ax.set_title('Posterior')
 
         elif dimension == 2:
             posterior_reshaped = posterior_values.reshape((grid[2][0], grid[2][1]))
             ax.imshow(posterior_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
-                                                    grid[0][:, 1].min(), grid[0][:, 1].max()],
-                    origin='lower', aspect='auto')
-            ax.set_title('Posterior')
+                                                    grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto')
 
         else:
             # N-dimensional Case: Use pairplots
@@ -382,19 +353,98 @@ class Sampling:
             for i in range(dimension):
                 for j in range(dimension):
                     if i == j:
-                        marginals = np.array([self.posterior([grid[0][k, i] if k == i else 0 for k in range(dimension)]) for k in range(len(grid[0]))])
+                        marginals = np.array([visual([grid[0][k, i] if k == i else 0 for k in range(dimension)]) for k in range(len(grid[0]))])
                         ax[i, j].plot(marginals)
                     else:
                         ax[i, j].scatter(grid[0][:, i], grid[0][:, j], s=5, alpha=0.5)
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                         ax[i, j].set_ylabel(f'$u_{j+1}$')
-
             plt.tight_layout()
-
         if show:
             plt.show()
 
-    def visualize_kde(self, kde_approximation, grid: tuple, ax):
+    def visualize_samples_trace(self, visual, title="Sample trace", ax=None, chainwise=-1, show=True):
+        """
+        Visualize sample traces.
+        
+        Parameters:
+        visual (np.ndarray): Samples array of shape (num_samples, dim) or (num_samples, num_chains, dim).
+        chainwise (bool): If True, merge chains; otherwise plot each chain separately.
+        ax (matplotlib.axes.Axes): Axis to plot on (if None, a new figure is created).
+        title (str): Title for the plot.
+        show (bool): Whether to call plt.show() at the end.
+        
+        Returns:
+        None
+        """
+        # Convert samples to shape (num_chains, num_samples, dim)
+        if visual.ndim == 2:
+            visual = visual[np.newaxis, :, :]
+        elif visual.ndim == 3:
+            visual = np.transpose(visual, (1, 0, 2))
+        else:
+            raise ValueError("Samples must be a 2D or 3D array.")
+        
+        num_chains, num_samples, dim = visual.shape
+        colors = plt.cm.tab10(np.linspace(0, 1, dim))
+        fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
+        visual = visual.reshape(-1, dim) if (chainwise == -1) else visual[chainwise]
+        ax.set_title(title) if (chainwise == -1) else ax.set_title(f"Chain {chainwise+1} - {title}")
+
+        for j in range(dim):
+            ax.plot(visual[:, j], color=colors[j], label=f"Dimension {j+1}")
+        
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Value")
+        ax.legend(loc="upper right")
+        
+        if show:
+            plt.show()
+
+    def visualize_samples_acf(self, visual, title="Autocorrelation", ax=None, chainwise=-1, show=True):
+        """
+        Visualize the autocorrelation functions (ACF) for each dimension.
+        
+        Parameters:
+        visual (np.ndarray): Samples array of shape (num_samples, dim) or (num_samples, num_chains, dim).
+        chainwise (bool): If True, compute ACF for merged chains; otherwise, for first chain.
+        max_lag (int): Maximum lag for ACF computation.
+        ax (matplotlib.axes.Axes): Axis to plot on (if None, a new figure is created).
+        title (str): Title for the plot.
+        show (bool): Whether to display the plot.
+        
+        Returns:
+        None
+        """
+        # Convert samples to shape (num_chains, num_samples, dim)
+        if visual.ndim == 2:
+            visual = visual[np.newaxis, :, :]
+        elif visual.ndim == 3:
+            visual = np.transpose(visual, (1, 0, 2))
+        else:
+            raise ValueError("Samples must be a 2D or 3D array.")
+        
+        num_chains, num_samples, dim = visual.shape
+        fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
+        ax.set_title(title) if (chainwise == -1) else ax.set_title(f"Chain {chainwise+1} - {title}")
+        visual = visual.reshape(-1, dim) if (chainwise == -1) else visual[chainwise]
+
+        acfs, sf = compute_acf_nd(visual)
+    
+        # Plot ACF as a stem plot
+        stem_container = ax.stem(np.arange(1, len(acfs)+1), acfs, basefmt=" ")
+        # Use a default color (or customize if desired)
+        plt.setp(stem_container.markerline, color='blue')
+        plt.setp(stem_container.stemlines, color='blue')
+        plt.setp(stem_container.baseline, color='k')
+        ax.set_xlabel("Lag")
+        ax.set_ylabel("ACF")
+        ax.legend([f"s_f = {sf:.2f}"], loc="upper right")
+        
+        if show:
+            plt.show()
+
+    def visualize_kde(self, visual, grid: tuple, title="KDE approximation", ax=None, show = True):
         """
         Visualizes the KDE approximation on the grid for N-dimensional cases.
         Only used from sampling_quality method.
@@ -412,20 +462,21 @@ class Sampling:
         visualize_kde(kde_approximation, grid, ax)
         ```
         """
+        # Create an axis if not provided
+        fig, ax = plt.subplots(figsize=(6, 6) if self.dimension == 1 else (6, 6)) if ax is None else (None, ax)
+        ax.set_title(title)
+
         if self.dimension == 1:
             # 1D Case: Plot KDE approximation as a line plot
-            ax.plot(grid[0][:, 0], kde_approximation, label='KDE Approximation')
+            ax.plot(grid[0][:, 0], visual, label='KDE Approximation')
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('Density')
-            ax.set_title('KDE Approximation')
 
         elif self.dimension == 2:
             # 2D Case: Use imshow for KDE approximation heatmap
-            kde_approximation_reshaped = kde_approximation.reshape((grid[2][0], grid[2][1]))
+            kde_approximation_reshaped = visual.reshape((grid[2][0], grid[2][1]))
             ax.imshow(kde_approximation_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
-                                                            grid[0][:, 1].min(), grid[0][:, 1].max()],
-                    origin='lower', aspect='auto')
-            ax.set_title('KDE Approximation')
+                                                            grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto')
 
         else:
             # N-dimensional Case: Use pair plots
@@ -433,17 +484,18 @@ class Sampling:
                 for j in range(self.dimension):
                     if i == j:
                         # Diagonal: 1D KDE approximation
-                        ax[i, j].plot(grid[0][:, i], kde_approximation, label='KDE', alpha=0.5)
+                        ax[i, j].plot(grid[0][:, i], visual, label='KDE', alpha=0.5)
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                     else:
                         # Off-diagonal: 2D scatter plot
                         ax[i, j].scatter(grid[0][:, i], grid[0][:, j], s=5, alpha=0.5)
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                         ax[i, j].set_ylabel(f'$u_{j+1}$')
-
         plt.tight_layout()
+        if show:
+            plt.show()
 
-    def create_grid(self, visual = None, max_points: int = 100, min_points: int = 10, margin: float = 0.1, ranges: list = None):
+    def create_grid(self, visual = None, max_points: int = 100, min_points: int = 10, margin: float = 0.1, ranges: list = []):
         """
         Creates a grid for comparing samples or posterior, with adaptive num_points for each dimension
         based on relative ranges and scaling for total number of dimensions.
@@ -470,14 +522,16 @@ class Sampling:
         ```
         """
 
-        
-
         dim_ranges = []
-        if ranges is None:
-            ranges = []
 
         # Case 1: If samples are provided, use them to calculate the grid bounds
-        if isinstance(visual, np.ndarray):
+        if ranges != []:
+            if len(ranges) != self.dimension:
+                raise ValueError("Ranges must be provided for each dimension.")
+            else:
+                dim_ranges = [r[1] - r[0] for r in ranges]
+
+        elif isinstance(visual, np.ndarray):
             # Check if samples come from multiple chains
             if visual.ndim == 3:
                 visual = visual.transpose(1, 0, 2).reshape(-1, self.dimension)
@@ -497,15 +551,11 @@ class Sampling:
         
         # Case 2: If a posterior function is provided, use default heuristic ranges
         elif (visual is None or callable(visual)):
-            if ranges == []:
-                for dim in range(self.dimension):
-                    ranges.append((-5, 5))  # Use default range for posterior
-                    dim_ranges.append(10)  # Example range for posterior
-            else:
-                if len(ranges) != self.dimension:
-                    raise ValueError("Ranges must be provided for each dimension.")
-                else:
-                    dim_ranges = [r[1] - r[0] for r in ranges]
+            for dim in range(self.dimension):
+                ranges.append((-5, 5))  # Use default range for posterior
+                dim_ranges.append(10)  # Example range for posterior
+        else:
+            raise ValueError("Either samples, distribution or ranges must be provided.")
 
         # Find the longest range and normalize other ranges relative to it
         max_range = max(dim_ranges)
@@ -567,7 +617,7 @@ class Sampling:
             raise ValueError("Currently only 2D sample space is supported for animation.")
 
         # Subsample the data
-        #samples = samples[::subsample_rate]
+        samples = samples[::subsample_rate]
 
         # Calculate the number of frames and the interval (in ms) between frames
         num_frames = len(samples)
@@ -601,7 +651,7 @@ class Sampling:
         else:
             plt.show()
 
-    def sampling_quality(self, samples: np.ndarray, visualise: bool = False):
+    def sampling_quality(self, samples: np.ndarray, ranges=[], visualise: bool = False):
         """
         Compares KDE approximation from samples with the actual posterior using KL divergence.
         
@@ -627,7 +677,7 @@ class Sampling:
             raise ValueError("Samples array must be 2D or 3D")
 
         # Create a grid using the samples (adjustable for N dimensions)
-        grid = self.create_grid(visual=samples)
+        grid = self.create_grid(visual=samples, ranges=ranges, max_points=100)
 
         # Apply KDE to the samples
         kde = gaussian_kde(samples.T)  # Transpose to match expected shape
@@ -658,7 +708,8 @@ class Sampling:
 
         if visualise:
             # Visualize the KDE approximation and the target posterior
-            self.visualize(visuals=[{"data": kde_approximation, "is_kde": True}, self.posterior], grid=grid)
+            self.kde = kde_approximation_flat
+            self.visualize(visuals=["kde", "posterior"], grid=grid)
 
         # Return KL Divergence value
         return kl_divergence
@@ -680,23 +731,14 @@ class Sampling:
         # plot parametr values against results
 
         return np.min(results)
-    
-    def benchmark(self, method, parametrs, metric: str = None):
-        # this function will benchmark the chosen method
-        
-        # we will be looking at autocorrelation length, ESS (effective sample size), time complexity
-        # we will be looking at the chosen method for the chosen parametrs
-        # result data will be stored in table and plot showcasing the benchmark
-
-        return # table, plot
 
     def compare(self, methods_dic: dict = {}, metric: str = None):
         # this function will just be used to call benchmark on all methods and then merge the result data intonice and comprehensive form
         tables = []
         plots = []
 
-        for method, parametrs in methods_dic:
-            tmp = self.benchmark(self, method, parametrs, metric)
+        for method, parameters in methods_dic:
+            tmp = self.benchmark(self, method, parameters, metric)
             tables.append(tmp[0])
             plots.append(tmp[1])
 
@@ -728,7 +770,7 @@ class MH(Sampling):
     ```
     """
 
-    def __init__(self, distribution, prop_dist=None, initial_cov=None, scale_factor=None, burnin=0.2):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2):
         """
         Initialize the Random Walk Metropolis algorithm.
 
@@ -747,8 +789,8 @@ class MH(Sampling):
         self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
         self.mean = np.zeros(self.dimension)
         self.burnin = burnin
-        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
-        self.C = np.eye(self.dimension) if initial_cov is None else initial_cov
+        self.prop_dist = multivariate_normal # Proposal distribution
+        self.C = self.scale_factor * np.eye(self.dimension) if initial_cov is None else initial_cov
         self.acc_rate = None
         self.samples = None
 
@@ -767,6 +809,15 @@ class MH(Sampling):
             initial = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
         return np.array(initial)
+    
+    def reset(self):
+        """
+        Reset the sampler to its initial state.
+        """
+
+        self.mean = np.zeros(self.dimension)
+        self.acc_rate = None
+        self.samples = None
 
     def sample(self, initial=None, N=10000):
         """
@@ -788,8 +839,7 @@ class MH(Sampling):
         
         for t in range(N + burnin_index):
             # Propose a new point
-            #proposal = np.random.multivariate_normal(current, self.scale_factor * self.C)
-            proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.C)
+            proposal = self.prop_dist.rvs(mean=current, cov=self.C)
             proposal_posterior = self.posterior(proposal)
             if self.log:
                 alpha = min(0, proposal_posterior - current_posterior)
@@ -808,6 +858,7 @@ class MH(Sampling):
         
         self.acc_rate = acc / N
         self.mean = np.mean(self.samples, axis=0)
+        return self.samples
 
 class AM(Sampling):
     """
@@ -815,14 +866,6 @@ class AM(Sampling):
     Uses a Gaussian proposal distribution.
 
     Attributes:
-    - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
-    - scale_factor (float): Scaling factor for the covariance matrix.
-    - mean (np.ndarray): Mean of the samples.
-    - burnin (float): Fraction of the total number of samples to discard as burn-in.
-    - update_step (int): Number of samples between covariance matrix updates.
-    - C (list): List of covariance matrices.
-    - acc_rate (float): Acceptance rate of the samples.
-    - samples (np.ndarray): Generated samples.
 
     Example usage:
     ```
@@ -832,17 +875,11 @@ class AM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, prop_dist=None, burnin=0.2, eps=1e-5, update_step=1):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, t0=1000, burnin=0.2, eps=1e-5, update_step=1):
         """
         Initialize the Adaptive Metropolis algorithm.
 
         Parameters:
-        - distribution (Sampling): Sampling object with the target distribution.
-        - initial_cov (np.ndarray): Initial covariance matrix for the proposal distribution.
-        - epsilon (float): Small value to ensure positive definiteness of the covariance matrix.
-        - scale_factor (float): Scaling factor for the covariance matrix.
-        - burnin (float): Fraction of the total number of samples to discard as burn-in.
-        - update_step (int): Number of samples between covariance matrix updates.
         """
 
         # Initialize using Sampling's constructor with attributes from the `distribution` instance
@@ -851,13 +888,17 @@ class AM(Sampling):
         # Additional attributes for AM
         self.eps = eps
         self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
-        self.mean = np.zeros(self.dimension)
+        self.mean = np.zeros(self.dimension)  # Track mean of all samples (including t0)
+        self.t0 = t0  # Initial fixed period for covariance
         self.burnin = burnin
         self.update_step = update_step
-        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
-        self.C = [np.eye(self.dimension)] if initial_cov is None else [initial_cov]
+        self.prop_dist = multivariate_normal
+        self.C0 = initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
+        self.C = None
         self.acc_rate = None
         self.samples = None
+        self.mean = np.zeros(self.dimension)  # Track mean of all samples
+        self.outer = np.zeros((self.dimension, self.dimension))
 
     def _initial_sample(self):
         """
@@ -873,53 +914,71 @@ class AM(Sampling):
             mode_idx = np.random.choice(len(self.prior_means))
             initial = multivariate_normal.rvs(mean=self.prior_means[mode_idx], cov=self.prior_covs[mode_idx])
 
-        return np.array(initial)    
+        return np.array(initial)
+    
+    def _reset(self):
+        """
+        Reset the sampler to its initial state.
+        """
+        self.mean = np.zeros(self.dimension)
+        self.outer = np.zeros((self.dimension, self.dimension))
+        self.C = None
+        self.acc_rate = None
+        self.samples = None
 
     def sample(self, initial=None, N=10000):
         """
         Run the Adaptive Metropolis algorithm for n_samples iterations.
 
         Parameters:
-        - x0 (np.ndarray): Initial point for the chain.
+        - initial (np.ndarray): Initial point for the chain.
         - N (int): Number of samples to generate.
 
         Returns:
         - None
         """
 
+        self._reset()  # Reset the sampler state
         current = self._initial_sample() if initial is None else initial
         current_posterior = self.posterior(current)
         burnin_index = int(self.burnin * N)
-        self.samples = np.zeros((N, self.dimension))
+        self.samples = np.zeros((N + burnin_index, self.dimension))
+        self.samples[0, :] = current
+        self.C = np.zeros((N + burnin_index + 1, self.dimension, self.dimension))
+        self.C[0,:,:] = self.C0
         acc = 0
+
+        # Reset running statistics
+        self.mean = current.copy()
+        self.outer[:] = 0
         
-        for t in range(N + burnin_index):
+        for t in range(1, N + burnin_index):
             # Propose a new point
-            #proposal = np.random.multivariate_normal(current, self.scale_factor * self.C[-1])
-            proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.C[-1])
+            proposal = self.prop_dist.rvs(mean=current, cov=self.C[t-1])
             proposal_posterior = self.posterior(proposal)
-            if self.log:
-                alpha = min(0, proposal_posterior - current_posterior)
-                u = np.log(np.random.rand())
-            else:
-                alpha = min(1, proposal_posterior / current_posterior)
-                u = np.random.rand()
+            alpha = min(0, proposal_posterior - current_posterior) if self.log else min(1, proposal_posterior / current_posterior)
+            u = np.log(np.random.rand()) if self.log else np.random.rand()
             # Accept the proposal with probability alpha
             if u < alpha:
-                current = proposal  
+                current = proposal
                 current_posterior = proposal_posterior
                 if t >= burnin_index:
                     acc += 1
-            if t >= burnin_index:
-                self.samples[t-burnin_index, :] = current
-                if (t >= burnin_index + 1) and (t - burnin_index) % self.update_step == 0:
-                    # Update covariance matrix with the recursive formula
-                    old_mean = self.mean
-                    self.mean = old_mean + (current - old_mean) / t
-                    diff = np.outer(current - self.mean, current - self.mean)
-                    self.C.append((t - 1) / t * self.C[-1] + (self.scale_factor / t) * (diff + self.eps * np.eye(self.dimension)))
+            self.samples[t, :] = current
+
+            # Update running statistics
+            delta = current - self.mean
+            self.mean += delta / (t + 1)
+            self.outer += np.outer(delta, current - self.mean)
+
+            if t <= self.t0:
+                self.C[t] = self.C[t-1]
+            else:
+                self.C[t] = ((self.scale_factor / t) * self.outer) + (self.eps * np.eye(self.dimension))
         
+        self.samples = self.samples[burnin_index:, :]
         self.acc_rate = acc / N
+        return self.samples
 
 class DRAM(Sampling):
     """
@@ -927,16 +986,6 @@ class DRAM(Sampling):
     Uses a Gaussian proposal distribution.
     
     Attributes:
-    - scale_factor (float): Scaling factor for the proposal covariance matrix.
-    - epsilon (float): Small constant for numerical stability.
-    - burnin (float): Fraction of the total number of samples to discard as burn-in.
-    - update_step (int): Number of samples between covariance matrix updates.
-    - num_stages (int): Number of proposal stages for delayed rejection.
-    - gammas (list): List of scaling factors for each proposal stage.
-    - C (list): List of covariance matrices.
-    - samples (np.ndarray): Generated samples.
-    - mean (np.ndarray): Mean of the samples.
-    - acc_rate (float): Acceptance rate of the samples.
 
     Example usage:
     ```
@@ -946,21 +995,11 @@ class DRAM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, prop_dist=None, burnin=0.2, eps=1e-5, update_step=1, gammas=None, num_stages=3):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2, t0=100, eps=1e-5, update_step=1, gammas=None, num_stages=3):
         """
         DRAM initialization.
         
         Parameters:
-        - posterior: Posterior distribution function.
-        - dimension: Number of dimensions for the parameter space.
-        - scale_factor: Scaling factor for the proposal covariance matrix.
-        - initial_cov: Initial covariance matrix for the proposal distribution.
-        - prop_dist: Proposal distribution to use for sampling.
-        - gammas: List of scaling factors for each proposal stage. Default: [1.0, 0.5] (for 2 stages).
-        - epsilon: Regularization term to avoid singular matrices.
-        - burnin: Fraction of the total number of samples to discard as burn-in.
-        - update_step: Number of samples between covariance matrix updates.
-        - num_stages: Number of proposal stages for delayed rejection.
         """
 
         # Initialize using Sampling's constructor with attributes from the `distribution` instance
@@ -970,15 +1009,18 @@ class DRAM(Sampling):
         self.scale_factor = (2.4**2) / self.dimension if scale_factor is None else scale_factor
         self.eps = eps  # Small constant for numerical stability
         self.burnin = burnin  # Non-adaptive period
+        self.t0 = t0  # Initial fixed period for covariance
         self.num_stages = num_stages  # Number of delayed rejection stages
         self.update_step = update_step  # Update covariance matrix every n samples
         self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)] if gammas is None else gammas
-        self.C = [np.eye(self.dimension)] if initial_cov is None else [initial_cov] # list of covariance matrices
-        self.prop_dist = prop_dist if prop_dist is not None else multivariate_normal # Proposal distribution
-        self.samples = None  # To store past samples
-        self.mean = np.zeros(self.dimension)  # Mean of the samples
+        self.prop_dist = multivariate_normal # Proposal distribution
+        self.C0 = initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
+        self.C = None
         self.acc = None  # Count of accepted samples
         self.acc_rate = None  # Acceptance rate of the samples
+        self.samples = None
+        self.mean = np.zeros(self.dimension)  # Track mean of all samples
+        self.outer = np.zeros((self.dimension, self.dimension))
 
     def _initial_sample(self):
         """
@@ -996,7 +1038,7 @@ class DRAM(Sampling):
 
         return np.array(initial)
 
-    def _acceptance_probability(self, stage_posterior, proposals):
+    def _acceptance_probability(self, stage_posterior, proposals, t):
         """
         Calculate the acceptance probability for a given likelihood history.
         
@@ -1020,17 +1062,17 @@ class DRAM(Sampling):
 
         for i in range(stage, 0, -1):
             if self.log:
-                numerator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
-                numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1])))
+                numerator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.gammas[stage - i] * self.C[t-1])
+                numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1], t=t)))
 
-                denominator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
-                denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i])))
+                denominator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.gammas[i-1] * self.C[t-1])
+                denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i], t=t)))
             else:
-                numerator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
-                numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1]))
+                numerator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.gammas[stage] * self.C[t-1])
+                numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1], t=t))
 
-                denominator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
-                denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i]))
+                denominator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.gammas[stage] * self.C[t-1])
+                denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i], t=t))
         
         if self.log:
             alpha += (numerator_alpha - denominator_alpha) if denominator_alpha > -np.inf else 0.0
@@ -1038,6 +1080,21 @@ class DRAM(Sampling):
             alpha *= (numerator_alpha / denominator_alpha) if denominator_alpha > 0 else 1.0
         
         return min(0, alpha) if self.log else min(1, alpha)
+    
+    def _reset(self):
+        """
+        Reset the sampler to its initial state.
+        
+        Returns:
+        - None
+        """
+        
+        self.acc = None
+        self.acc_rate = None
+        self.samples = None
+        self.mean = np.zeros(self.dimension)
+        self.outer = np.zeros((self.dimension, self.dimension))
+        self.C = None
 
     def sample(self, initial=None, N=10000):
         """
@@ -1050,12 +1107,20 @@ class DRAM(Sampling):
         Returns:
         - None
         """
-    
+
+        self._reset()  # Reset the sampler to its initial state
         current = self._initial_sample() if initial is None else initial
         current_posterior = self.posterior(current)
         burnin_index = int(self.burnin * N)
-        self.samples = np.zeros((N, self.dimension))
+        self.samples = np.zeros((N + burnin_index, self.dimension))
+        self.samples[0, :] = current
         self.acc = np.zeros((self.num_stages, 2))
+        self.C = np.zeros((N + burnin_index + 1, self.dimension, self.dimension))
+        self.C[0,:,:] = self.C0
+
+        # Reset running statistics
+        self.mean = current.copy()
+        self.outer[:] = 0
 
         for t in range(N + burnin_index):
             stage_posterior = [current_posterior]
@@ -1065,19 +1130,15 @@ class DRAM(Sampling):
                     self.acc[stage, 0] += 1
 
                 # Propose a new point for the current stage
-                # proposal = np.random.multivariate_normal(current, self.scale_factor * self.gammas[stage] * self.C[-1])
-                proposal = self.prop_dist.rvs(mean=current, cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                proposal = self.prop_dist.rvs(mean=current, cov=self.gammas[stage] * self.C[t-1])
                 proposal_posterior = self.posterior(proposal)
                 proposals.append(proposal)
                 stage_posterior.append(proposal_posterior)
 
                 # Calculate acceptance probability for the current stage
-                if self.log:
-                    alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
-                    u = np.log(np.random.rand())
-                else:
-                    alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
-                    u = np.random.rand()
+                alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals, t=t)
+                u = np.log(np.random.rand()) if self.log else np.random.rand()
+
                 # Accept the proposal with probability alpha
                 if u < alpha:
                     current = proposal
@@ -1086,30 +1147,37 @@ class DRAM(Sampling):
                         self.acc[stage, 1] += 1
                     break 
 
-            if t >= burnin_index:
-                self.samples[t-burnin_index, :] = current
-                if (t >= burnin_index + 1) and (t - burnin_index) % self.update_step == 0:
-                    # Update covariance matrix with the recursive formula
-                    old_mean = self.mean
-                    self.mean = old_mean + (current - old_mean) / t
-                    diff = np.outer(current - self.mean, current - self.mean)
-                    self.C.append((t - 1) / t * self.C[-1] + (self.scale_factor / t) * (diff + self.eps * np.eye(self.dimension)))
+            self.samples[t, :] = current
+
+            # Update running statistics
+            delta = current - self.mean
+            self.mean += delta / (t + 1)
+            self.outer += np.outer(delta, current - self.mean)
+
+            if t <= self.t0:
+                self.C[t] = self.C[t-1]
+            else:
+                self.C[t] = ((self.scale_factor / t) * self.outer) + (self.eps * np.eye(self.dimension))
         
+        self.samples = self.samples[burnin_index:, :]
         self.acc_rate = self.acc[:, 1] / self.acc[:, 0]
+        return self.samples
 
 class DREAM(Sampling):
-    def __init__(self, distribution, chains=None, scale_factor=None, prop_dist=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, num_stages=3, outlier_detection=True):
+    def __init__(self, distribution, chains=None, scale_factor=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, num_stages=3, outlier_detection=True):
         """
         Initializes the DREAM sampling algorithm.
         
         Parameters:
-        - posterior: Target posterior distribution.
-        - dimension: Dimensionality of the parameter space.
-        - num_chains: Number of chains for sampling.
-        - crossover_prob (CR): Crossover probability for subspace sampling.
-        - scale_factor: Scaling factor for proposal step sizes.
-        - burnin_ratio: Fraction of the total steps for burn-in.
-        - nCR: Number of crossover probabilities to explore during burn-in.
+        - distribution: Sampling object with the target distribution.
+        - chains: Number of chains to use in the algorithm.
+        - scale_factor: Scaling factor for the proposal covariance matrix.
+        - burnin: Fraction of the total number of samples to discard as burn-in.
+        - nCR: Number of crossover probabilities to explore.
+        - max_pairs: Maximum number of pairs to use for the differential evolution.
+        - eps: Small constant for numerical stability.
+        - num_stages: Number of proposal stages for delayed rejection.
+        - outlier_detection: Flag to enable outlier detection.
         """
         
         # Initialize using Sampling's constructor with attributes from the `distribution` instance
@@ -1119,7 +1187,7 @@ class DREAM(Sampling):
         self.chains = max(10, self.dimension//2) if chains is None else chains
         self.scale_factor = 2.38 if scale_factor is None else scale_factor
         self.burnin = burnin
-        self.max_pairs = max_pairs
+        self.max_pairs = max_pairs if max_pairs < (self.chains - 1) else self.chains - 1
         self.outlier_threshold = 2.0
         self.outlier_detection = outlier_detection
         self.num_stages = num_stages  # Number of delayed rejection stages
@@ -1204,7 +1272,8 @@ class DREAM(Sampling):
         Calculate the acceptance probability for a given likelihood history.
         
         Parameters:
-        - lh: Likelihood history for the current stage.
+        - stage_posterior: Posterior values for the current stage.
+        - proposals: Proposed points for the current stage.
 
         Returns:
         - alpha: Acceptance probability for the likelihood history.
@@ -1223,16 +1292,16 @@ class DREAM(Sampling):
 
         for i in range(stage, 0, -1):
             if self.log:
-                #numerator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
+                #numerator_alpha += add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
                 numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1])))
 
-                #denominator_alpha += self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
+                #denominator_alpha += add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
                 denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i])))
             else:
-                #numerator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                #numerator_alpha *= add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
                 numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1]))
 
-                #denominator_alpha *= self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
+                #denominator_alpha *= add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
                 denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i]))
         
         if self.log:
@@ -1303,17 +1372,34 @@ class DREAM(Sampling):
 
         self.R_hat = R_hat
 
+    def _reset(self):
+        """
+        Resets the DREAM algorithm by reinitializing the population and other parameters.
+        """
+        
+        self.samples = None
+        self.acc = None
+        self.acc_rate = None
+        self.posterior_history = None
+        self.R_hat = None
+        self.outlier_resets = 0
+        self.h_a = np.zeros(self.nCR)  # Counts of usage for each CR value
+        self.Delta_a = np.zeros(self.nCR)  # Sum of squared jumping distances for each CR value
+        self.p_a = np.ones(self.nCR) / self.nCR  # Equal probability for each crossover probability
+
     def sample(self, initial=None, N=10000):
         """
         Runs the DREAM algorithm over a specified number of generations.
         
         Parameters:
-        - prior: Prior distribution to initialize the population.
-        - num_generations: Number of generations to run.
+        - initial: Initial population of points for the chains.
+        - N: Number of generations to run the algorithm.
         
         Returns:
         - Array of sampled points from the posterior distribution.
         """
+
+        self._reset()  # Reset the algorithm before sampling
         current = self._initialize_population() if initial is None else initial
         current_posterior = [self.posterior(u) for u in current]
         burnin_index = int(self.burnin * N)
@@ -1334,7 +1420,7 @@ class DREAM(Sampling):
                 for stage in range(self.num_stages):
                     if gen >= burnin_index:
                         self.acc[chain, stage, 0] += 1
-                    # Sample crossover probability CR = m / nCR
+                    # Sample crossover probability CR = a / nCR
                     a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_a)
                     CR = a / self.nCR
                     self.h_a[a - 1] += 1  # Count usage of this CR value
@@ -1380,3 +1466,110 @@ class DREAM(Sampling):
 
         self.acc_rate = self.acc[:, :, 1] / self.acc[:, :, 0]
         self._compute_gelman_rubin()
+        return self.samples
+
+def compute_acf_nd(series, max_lag=None):
+    """
+    Compute the autocorrelation function (ACF) and the autocorrelation length (s_f)
+    for an N-dimensional time series by averaging the per-dimension autocorrelations.
+    
+    Parameters:
+      series (array-like): 2D array of shape (num_samples, d) for a single chain.
+      max_lag (int): Maximum lag to consider (default is min(100, num_samples//2)).
+      
+    Returns:
+      acfs (np.ndarray): 1D array of averaged autocorrelations for lags 1,2,...,max_lag.
+      s_f (float): Autocorrelation length computed as 1 + 2 * sum_{lag: acf(lag) > 0} acf(lag).
+    """
+    series = np.asarray(series)
+    N, d = series.shape
+    max_lag = min(1000, N // 2) if max_lag is None else max_lag
+    acfs = []
+    for lag in range(1, max_lag + 1):
+        # Compute acf for each dimension at this lag:
+        acfs_dim = [np.corrcoef(series[:-lag, j], series[lag:, j])[0, 1] for j in range(d)]
+        # Average over dimensions:
+        acfs.append(np.mean(acfs_dim))
+    acfs = np.array(acfs)
+    s_f = 1 + 2 * np.sum(acfs[acfs > 0])
+    return acfs, s_f
+
+def compute_diagnostics(samples, chainwise=-1, max_lag=None):
+    """
+    Computes the overall autocorrelation length (s_f) and effective sample size (ESS)
+    for a set of samples. The autocorrelation is computed by averaging over dimensions.
+    
+    Parameters:.
+    
+    Returns:
+      diagnostics (dict): Dictionary with keys "s_f" and "ESS".
+    """
+    # Normalize input: if 2D, add chain dimension.
+    if samples.ndim == 2:
+            samples = samples[np.newaxis, :, :]
+    elif samples.ndim == 3:
+        samples = np.transpose(samples, (1, 0, 2))
+    else:
+        raise ValueError("Samples must be a 2D or 3D array.")
+    
+    num_chains, num_samples, dim = samples.shape
+    samples = samples.reshape(-1, dim) if (chainwise == -1) else samples[chainwise]
+
+    acfs, sf = compute_acf_nd(samples, max_lag=max_lag)
+    ess = len(samples) / sf if sf > 0 else np.nan
+
+    return {"s_f": sf, "ESS": ess}
+
+def benchmark(sampler, runs=10, num_samples=10000, initial=None, ranges=[], compute_kl=False, visualize=False):
+    """
+    Benchmark a given sampling algorithm by running it multiple times, computing diagnostics, and (optionally) visualizing.
+    
+    Parameters:
+    
+    Returns:
+      pd.DataFrame: DataFrame containing statistics (Run, s_f, ESS) for each run and overall average.
+    """
+    import pandas as pd
+    all_stats = []
+    all_samples_runs = []
+    
+    for run in range(runs):
+        samples = sampler.sample(N=num_samples, initial=initial)
+        all_samples_runs.append(samples)
+        diag = compute_diagnostics(samples)
+        stats = {
+            "Run": run + 1,
+            "Autocorrelation Length (s_f)": round(diag["s_f"], 2),
+            "Effective Sample Size (ESS)": round(diag["ESS"], 2)
+        }
+        if compute_kl:
+            kl = sampler.sampling_quality(samples, ranges=ranges)
+            stats["KL Divergence"] = round(kl, 2)
+        all_stats.append(stats)
+
+        # Compute overall averages
+        avg_s_f = np.mean([stat["Autocorrelation Length (s_f)"] for stat in all_stats])
+        avg_ess = np.mean([stat["Effective Sample Size (ESS)"] for stat in all_stats])
+        stats = {
+            "Run": "Average",
+            "Autocorrelation Length (s_f)": round(avg_s_f, 2),
+            "Effective Sample Size (ESS)": round(avg_ess, 2)
+        }
+        if compute_kl:
+            avg_kl = np.mean([stat["KL Divergence"] for stat in all_stats])
+            stats["KL Divergence"] = round(avg_kl, 3)
+    all_stats.append(stats)
+    df_stats = pd.DataFrame(all_stats)
+    
+    if visualize:
+        #samples_run = all_samples_runs[0]
+        fig, axs = plt.subplots(2, 1, figsize=(12, 8))
+        sampler.visualize_samples_trace(visual=sampler.samples, ax=axs[0], show=False)
+        sampler.visualize_samples_acf(visual=sampler.samples, ax=axs[1], show=False)
+        plt.tight_layout()
+        plt.show()
+        if compute_kl:
+            kl = sampler.sampling_quality(sampler.samples, ranges=ranges, visualise=True)
+    
+    return df_stats
+
