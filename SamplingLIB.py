@@ -4,11 +4,12 @@ from scipy.stats import multivariate_normal
 from scipy.special import logsumexp
 from typing import Callable
 import matplotlib.animation as animation
-from matplotlib.colors import to_hex
 from scipy.stats import gaussian_kde, entropy
 from IPython.display import HTML
 import arviz as az
 import pandas as pd
+import seaborn as sns
+import emcee
 
 class Sampling:
     """
@@ -32,7 +33,7 @@ class Sampling:
     """
 
     def __init__(self, dimension=2, posterior=None, likelihood=None, forward_model=None, observed_data=None, noise_cov=None,
-                 prior=None, prior_means=None, prior_covs=None, weights=None, kde=None, samples=None, log=False):
+                 prior=None, prior_means=None, prior_covs=None, weights=None, true_mean=None, kde=None, samples=None, log=False):
         """
         Constructor for the Sampling class.
 
@@ -57,6 +58,7 @@ class Sampling:
 
         self.dimension = dimension
         self.log = log
+        self.true_mean = true_mean
 
         self.likelihood = likelihood
         self.forward_model = forward_model
@@ -133,7 +135,7 @@ class Sampling:
 
         return logsumexp(log_probs + self.weights) if self.log else np.sum(np.dot(self.weights, np.exp(log_probs)))
 
-    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = [], max_points: int = 50):
+    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = [], max_points: int = 50, samples=None, vertical=False):
         """
         Visualizes the samples based on their dimensionality, and compares to posterior.
 
@@ -152,19 +154,19 @@ class Sampling:
         visualize(posterior, ranges=[(-5, 5), (-5, 5)], max_points=1000)
         ```
         """
-
+        samples = self.samples if samples is None else samples
         visuals_map = {"prior": [self.prior, self.visualize_posterior],
                        "posterior": [self.posterior, self.visualize_posterior],
                        "likelihood": [self.likelihood, self.visualize_posterior],
                        "forward_model": [self.forward_model, self.visualize_posterior],
                        "kde": [self.kde, self.visualize_kde],
-                       "samples_hist": [self.samples, self.visualize_samples_hist],
-                       "samples_scatter": [self.samples, self.visualize_samples_scatter],
-                       "samples_trace": [self.samples, self.visualize_samples_trace],
-                       "samples_acf": [self.samples, self.visualize_samples_acf]}
+                       "samples_hist": [samples, self.visualize_samples_hist],
+                       "samples_scatter": [samples, self.visualize_samples_scatter],
+                       "samples_trace": [samples, self.visualize_samples_trace],
+                       "samples_acf": [samples, self.visualize_samples_acf]}
 
         visuals = ["posterior"] if visuals == [] else visuals
-        fig, axes = plt.subplots(1, len(visuals), figsize=(5*len(visuals), 5))
+        fig, axes = plt.subplots(len(visuals), 1, figsize=(15, 5*len(visuals))) if vertical else plt.subplots(1, len(visuals), figsize=(5*len(visuals), 5))
         axes = [axes] if len(visuals) == 1 else axes
         axis_iter = iter(axes)  # Create an iterator over axes
 
@@ -172,7 +174,7 @@ class Sampling:
             if visual in visuals_map and visuals_map[visual][0] is not None:
                 obj, plot_func = visuals_map[visual]
                 if visual not in ["samples_scatter", "samples_trace", "samples_acf"]:
-                    if grid is None:
+                    if (grid is None and self.dimension <= 2):
                         grid = self.create_grid(visual=obj, ranges=ranges, max_points=max_points)                    
                     plot_func(visual=obj, grid=grid, title=visual, ax=next(axis_iter), show=False)
                 else:
@@ -204,12 +206,12 @@ class Sampling:
 
         # Check if samples come from multiple chains
         if visual.ndim == 3:
-            visual = visual.transpose(1, 0, 2).reshape(-1, self.dimension)
+            visual = visual.reshape(-1, self.dimension)
         elif visual.ndim > 3:
             raise ValueError("Samples array must be 2D or 3D")
 
         # Create a grid if not provided
-        grid = self.create_grid(visual=visual) if grid is None else grid
+        grid = self.create_grid(visual=visual) if (grid is None and self.dimension <= 2) else grid
 
         # Create an axis if not provided
         fig, ax = (plt.subplots(figsize=(6, 6)) if ax is None else (None, ax))
@@ -227,20 +229,10 @@ class Sampling:
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('$u_2$')
 
-        else:
-            # N-dimensional Case: Use pairplots
-            for i in range(self.dimension):
-                for j in range(self.dimension):
-                    if i == j:
-                        # Diagonal: 1D histogram for individual dimensions
-                        ax[i, j].hist(visual[:, i], bins=grid[2][i], alpha=0.5)
-                        ax[i, j].set_xlabel(f'$u_{i+1}$')
-                    else:
-                        # Off-diagonal: 2D scatter or density plot
-                        ax[i, j].scatter(visual[:, i], visual[:, j], s=5, alpha=0.5)
-                        ax[i, j].set_xlabel(f'$u_{i+1}$')
-                        ax[i, j].set_ylabel(f'$u_{j+1}$')
-            plt.tight_layout()
+        elif self.dimension > 2 and ax == None and show:  # N-dimensional histogram
+            # N-dimensional histogram: Use pair plots
+            df = pd.DataFrame(visual, columns=[f'$u_{i+1}$' for i in range(self.dimension)])
+            sns.pairplot(df, diag_kind='hist', corner=True, ax=ax)
         if show:
             plt.show()
 
@@ -265,7 +257,7 @@ class Sampling:
 
         # Check if samples come from multiple chains
         if visual.ndim == 3:
-            N_gen, N_chains, dimension = visual.shape
+            N_chains, N_gen, dimension = visual.shape
         elif visual.ndim == 2:
             N_gen, dimension = visual.shape
             N_chains = 1  # Single chain
@@ -275,35 +267,38 @@ class Sampling:
         # Create an axis if not provided
         fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax)
         ax.set_title(title)
+        colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
 
-        if dimension == 1:
-            # 1D scatter plot: Plot samples against their index
+        if dimension == 1: # 1D scatter plot: Plot samples against their index
             if N_chains > 1:
-                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(range(N_gen), visual[:, chain, 0], '.', color=color, label=f'Chain {chain+1}')
+                    ax.plot(range(N_gen), visual[chain, :, 0], '.', color=color, label=f'Chain {chain+1}')
+                ax.legend(loc='upper right')
             else:
                 ax.plot(range(N_gen), visual[:, 0], '.', alpha=0.5)
             ax.set_xlabel('Sample Index')
             ax.set_ylabel('$u_1$')
-            if N_chains > 1:
-                ax.legend(loc='upper right')
 
-        elif dimension == 2:
-            # 2D scatter plot
+        elif dimension == 2: # 2D scatter plot
             if N_chains > 1:
-                colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(visual[:, chain, 0], visual[:, chain, 1], '.', color=color, label=f'Chain {chain+1}')
+                    ax.plot(visual[chain, :, 0], visual[chain, :, 1], '.', color=color, label=f'Chain {chain+1}')
+                ax.legend(loc='upper right')
             else:
                 ax.plot(visual[:, 0], visual[:, 1], '.', alpha=0.5)
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('$u_2$')
-            if N_chains > 1:
-                ax.legend(loc='upper right')
 
-        else:
-            raise ValueError("This function only handles 1D and 2D cases.")
+        elif dimension > 2 and ax == None and show:  # N-dimensional scatter plot 
+            if visual.ndim == 3:
+                visual = visual.reshape(-1, self.dimension)
+                chain_labels = np.repeat(np.arange(visual.shape[0] // N_gen), N_gen)
+            else:
+                chain_labels = np.zeros(visual.shape[0])
+
+            df = pd.DataFrame(visual, columns=[f'$u_{i+1}$' for i in range(self.dimension)])
+            df['Chain'] = chain_labels
+            sns.pairplot(df, hue='Chain', palette='tab10', diag_kind='hist', corner=True)
         if show:
             plt.show()
 
@@ -328,8 +323,10 @@ class Sampling:
         visualize_posterior(posterior, grid, ranges=[(-5, 5), (-5, 5)], max_points=1000, show=True)
         ```
         """
+        if self.dimension > 2:
+            raise ValueError("Posterior visualization is only supported for 1D or 2D cases.")
 
-        grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points) if grid is None else grid # Create a grid if not provided
+        grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points) if (grid is None and self.dimension <= 2) else grid # Create a grid if not provided
         fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax) # Create an axis if not provided
         ax.set_title(title)
 
@@ -346,20 +343,7 @@ class Sampling:
             posterior_reshaped = posterior_values.reshape((grid[2][0], grid[2][1]))
             ax.imshow(posterior_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
                                                     grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto')
-
-        else:
-            # N-dimensional Case: Use pairplots
-            fig, ax = plt.subplots(dimension, dimension, figsize=(15, 15))
-            for i in range(dimension):
-                for j in range(dimension):
-                    if i == j:
-                        marginals = np.array([visual([grid[0][k, i] if k == i else 0 for k in range(dimension)]) for k in range(len(grid[0]))])
-                        ax[i, j].plot(marginals)
-                    else:
-                        ax[i, j].scatter(grid[0][:, i], grid[0][:, j], s=5, alpha=0.5)
-                        ax[i, j].set_xlabel(f'$u_{i+1}$')
-                        ax[i, j].set_ylabel(f'$u_{j+1}$')
-            plt.tight_layout()
+            
         if show:
             plt.show()
 
@@ -380,9 +364,7 @@ class Sampling:
         # Convert samples to shape (num_chains, num_samples, dim)
         if visual.ndim == 2:
             visual = visual[np.newaxis, :, :]
-        elif visual.ndim == 3:
-            visual = np.transpose(visual, (1, 0, 2))
-        else:
+        if visual.ndim != 3:
             raise ValueError("Samples must be a 2D or 3D array.")
         
         num_chains, num_samples, dim = visual.shape
@@ -401,7 +383,7 @@ class Sampling:
         if show:
             plt.show()
 
-    def visualize_samples_acf(self, visual, title="Autocorrelation", ax=None, chainwise=-1, show=True):
+    def visualize_samples_acf(self, visual, title="Autocorrelation", ax=None, IAT_avg=None, IAT_max=None, acfs=None, show=True):
         """
         Visualize the autocorrelation functions (ACF) for each dimension.
         
@@ -416,30 +398,22 @@ class Sampling:
         Returns:
         None
         """
-        # Convert samples to shape (num_chains, num_samples, dim)
-        if visual.ndim == 2:
-            visual = visual[np.newaxis, :, :]
-        elif visual.ndim == 3:
-            visual = np.transpose(visual, (1, 0, 2))
-        else:
-            raise ValueError("Samples must be a 2D or 3D array.")
-        
-        num_chains, num_samples, dim = visual.shape
-        fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
-        ax.set_title(title) if (chainwise == -1) else ax.set_title(f"Chain {chainwise+1} - {title}")
-        visual = visual.reshape(-1, dim) if (chainwise == -1) else visual[chainwise]
 
-        acfs, sf = compute_acf_nd(visual)
+        fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
+        ax.set_title(title)
+
+        if IAT_avg is None or acfs is None or IAT_max is None:
+            IAT_avg, IAT_max, acfs = compute_autocorrelation(samples=visual)
     
-        # Plot ACF as a stem plot
-        stem_container = ax.stem(np.arange(1, len(acfs)+1), acfs, basefmt=" ")
-        # Use a default color (or customize if desired)
-        plt.setp(stem_container.markerline, color='blue')
-        plt.setp(stem_container.stemlines, color='blue')
-        plt.setp(stem_container.baseline, color='k')
+        # Plot ACF as a line plot with dots at each point
+        ax.plot(np.arange(1, len(acfs) + 1), acfs, color='blue', linewidth=1, label='ACF')
+        ax.scatter(np.arange(1, len(acfs) + 1), acfs, color='blue', s=10)  # Add dots at each point
+        ax.axhline(0, color='red', linestyle='--', linewidth=1)
+        ax.axvline(IAT_avg, color='black', linestyle=':', linewidth=1, label=f"IAT_avg = {IAT_avg:.2f}")
+        ax.axvline(IAT_max, color='black', linestyle=':', linewidth=1, label=f"IAT_max = {IAT_max:.2f}")
         ax.set_xlabel("Lag")
         ax.set_ylabel("ACF")
-        ax.legend([f"s_f = {sf:.2f}"], loc="upper right")
+        ax.legend(loc="upper right")
         
         if show:
             plt.show()
@@ -672,7 +646,7 @@ class Sampling:
 
         # Check if samples come from multiple chains
         if samples.ndim == 3:
-            samples = samples.transpose(1, 0, 2).reshape(-1, self.dimension)
+            samples = samples.reshape(-1, self.dimension)
         elif samples.ndim > 3:
             raise ValueError("Samples array must be 2D or 3D")
 
@@ -794,6 +768,17 @@ class MH(Sampling):
         self.acc_rate = None
         self.samples = None
 
+    def print_info(self):
+        """
+        Print information about the sampling method and its parameters.
+        """
+        print(f"Sampling Method: {self.__class__.__name__}")
+        print(f"Scale Factor: {self.scale_factor}")
+        print(f"Covariance Matrix: {self.C}")
+        print(f"Burn-in: {self.burnin}")
+        print(f"Mean of Samples: {self.mean}")
+        print(f"Acceptance Rate: {(self.acc_rate * 100):.2f}%")
+
     def _initial_sample(self):
         """
         Generate an initial sample.
@@ -841,12 +826,8 @@ class MH(Sampling):
             # Propose a new point
             proposal = self.prop_dist.rvs(mean=current, cov=self.C)
             proposal_posterior = self.posterior(proposal)
-            if self.log:
-                alpha = min(0, proposal_posterior - current_posterior)
-                u = np.log(np.random.rand())
-            else:
-                alpha = min(1, proposal_posterior / current_posterior)
-                u = np.random.rand()
+            alpha = min(0, proposal_posterior - current_posterior) if self.log else min(1, proposal_posterior / current_posterior)
+            u = np.log(np.random.rand()) if self.log else np.random.rand()
             # Accept the proposal with probability alpha
             if u < alpha: 
                 current = proposal  
@@ -899,6 +880,21 @@ class AM(Sampling):
         self.samples = None
         self.mean = np.zeros(self.dimension)  # Track mean of all samples
         self.outer = np.zeros((self.dimension, self.dimension))
+
+    def print_info(self):
+        """
+        Print information about the sampling method and its parameters.
+        """
+        print(f"Sampling Method: {self.__class__.__name__}")
+        print(f"Scale Factor: {self.scale_factor}")
+        print(f"t0: {self.t0}")
+        print(f"Initial covariance (C0): {self.C0}")
+        print(f"Covariance Matrix: {self.C[-1]}")
+        print(f"Epsilon: {self.eps}")
+        print(f"Burn-in: {self.burnin}")
+        print(f"Update Step: {self.update_step}")
+        print(f"Mean of Samples: {self.mean}")
+        print(f"Acceptance Rate: {(self.acc_rate * 100):.2f}%")
 
     def _initial_sample(self):
         """
@@ -1021,6 +1017,27 @@ class DRAM(Sampling):
         self.samples = None
         self.mean = np.zeros(self.dimension)  # Track mean of all samples
         self.outer = np.zeros((self.dimension, self.dimension))
+
+    def print_info(self):
+        """
+        Print information about the sampling method and its parameters.
+        """
+        print(f"Sampling Method: {self.__class__.__name__}")
+        print(f"Scale Factor: {self.scale_factor}")
+        print(f"t0: {self.t0}")
+        print(f"Initial covariance (C0): {self.C0}")
+        print(f"Covariance Matrix: {self.C[-1]}")
+        print(f"Epsilon: {self.eps}")
+        print(f"Burn-in: {self.burnin}")
+        print(f"Update Step: {self.update_step}")
+        print(f"Number of Stages: {self.num_stages}")
+        print(f"Gammas: {self.gammas}")
+        print(f"Mean of Samples: {self.mean}")
+        for i, acc_rate in enumerate(self.acc_rate):
+            print(f"Acceptance rate for stage {i+1}: {(acc_rate * 100):.2f}%")
+        print("-----------------------------------------------------------------------------------------")
+        N = self.samples.shape[1] if self.samples.ndim == 3 else self.samples.shape[0]
+        print(f"Acceptance rate: {(sum(self.acc[:,1])/N) * 100:.2f}%")
 
     def _initial_sample(self):
         """
@@ -1164,7 +1181,7 @@ class DRAM(Sampling):
         return self.samples
 
 class DREAM(Sampling):
-    def __init__(self, distribution, chains=None, scale_factor=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, num_stages=3, outlier_detection=True):
+    def __init__(self, distribution, chains=None, scale_factor=None, burnin=0.2, nCR=3, max_pairs=3, eps=1e-5, outlier_detection=True):
         """
         Initializes the DREAM sampling algorithm.
         
@@ -1190,10 +1207,9 @@ class DREAM(Sampling):
         self.max_pairs = max_pairs if max_pairs < (self.chains - 1) else self.chains - 1
         self.outlier_threshold = 2.0
         self.outlier_detection = outlier_detection
-        self.num_stages = num_stages  # Number of delayed rejection stages
-        self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)]  # Scaling factors for each proposal stage
         self.eps = eps
         self.samples = None
+        self.mean = None
         self.acc = None
         self.acc_rate = None
         self.posterior_history = None
@@ -1205,6 +1221,29 @@ class DREAM(Sampling):
         self.p_a = np.ones(nCR) / nCR  # Equal probability for each crossover probability
         self.h_a = np.zeros(nCR)  # Counts of usage for each CR value
         self.Delta_a = np.zeros(nCR)  # Sum of squared jumping distances for each CR value
+
+    def print_info(self):
+        """
+        Print information about the sampling method and its parameters.
+        """
+        print(f"Sampling Method: {self.__class__.__name__}")
+        print(f"Number of Chains: {self.chains}")
+        print(f"Scale Factor: {self.scale_factor}")
+        print(f"Burn-in: {self.burnin}")
+        print(f"Max Pairs: {self.max_pairs}")
+        print(f"Epsilon: {self.eps}")
+        print(f"Outlier Detection: {self.outlier_detection}")
+        print(f"Outlier Resets: {self.outlier_resets}")
+        print(f"R_hat: {self.R_hat}")
+        print(f"nCR: {self.nCR}")
+        print(f"p_a: {self.p_a}")
+        print(f"h_a: {self.h_a}")
+        print(f"Delta_a: {self.Delta_a}")
+        print(f"Mean of Samples: {self.mean}")
+        for chain in range(self.chains):
+            print(f"Acceptance rate for chain {chain+1}: {(self.acc_rate[chain]*100):.2f}%")
+        print("-----------------------------------------------------------------------------------------")
+        print(f"Acceptance rate: {(np.mean(self.acc_rate)*100):.2f}%")
 
     def _initialize_population(self):
         """
@@ -1226,7 +1265,7 @@ class DREAM(Sampling):
 
         return initial
 
-    def _propose_point(self, current, chain, gen, CR, stage):
+    def _propose_point(self, current, chain, gen, CR):
         """
         Generates a candidate point for the given chain using differential evolution.
 
@@ -1261,55 +1300,11 @@ class DREAM(Sampling):
 
                 e = np.random.uniform(-self.eps, self.eps)
                 eps = np.random.normal(0, self.eps)
-                proposal_point[i] = current[chain][i] + ((1 + e) * (beta * diff) * self.gammas[stage]) + eps
+                proposal_point[i] = current[chain][i] + ((1 + e) * (beta * diff)) + eps
             else:
                 d -= 1
 
         return proposal_point
-
-    def _acceptance_probability(self, stage_posterior, proposals):
-        """
-        Calculate the acceptance probability for a given likelihood history.
-        
-        Parameters:
-        - stage_posterior: Posterior values for the current stage.
-        - proposals: Proposed points for the current stage.
-
-        Returns:
-        - alpha: Acceptance probability for the likelihood history.
-        """
-
-        stage = len(stage_posterior) - 2
-
-        if self.log:
-            alpha = (stage_posterior[-1] - stage_posterior[0]) if stage_posterior[0] > -np.inf else 0.0
-            numerator_alpha = 0.0
-            denominator_alpha = 0.0
-        else:
-            alpha = (stage_posterior[-1] / stage_posterior[0]) if stage_posterior[0] > 0 else 1.0
-            numerator_alpha = 1.0
-            denominator_alpha = 1.0
-
-        for i in range(stage, 0, -1):
-            if self.log:
-                #numerator_alpha += add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.logpdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage - i] * self.C[-1])
-                numerator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1])))
-
-                #denominator_alpha += add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.logpdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[i-1] * self.C[-1])
-                denominator_alpha += np.log1p(-np.exp(self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i])))
-            else:
-                #numerator_alpha *= add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.pdf(proposals[i], mean=proposals[-1], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
-                numerator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[i:][::-1], proposals=proposals[i:][::-1]))
-
-                #denominator_alpha *= add apropriate transition probability, Note: for example with normal transition probability it would be: self.prop_dist.pdf(proposals[i], mean=proposals[0], cov=self.scale_factor * self.gammas[stage] * self.C[-1])
-                denominator_alpha *= (1 - self._acceptance_probability(stage_posterior=stage_posterior[:len(stage_posterior) - i], proposals=proposals[:len(stage_posterior) - i]))
-        
-        if self.log:
-            alpha += (numerator_alpha - denominator_alpha) if denominator_alpha > -np.inf else 0.0
-        else:
-            alpha *= (numerator_alpha / denominator_alpha) if denominator_alpha > 0 else 1.0
-        
-        return min(0, alpha) if self.log else min(1, alpha)
 
     def _outlier_detection(self, current, current_posterior, gen):
         """
@@ -1378,6 +1373,7 @@ class DREAM(Sampling):
         """
         
         self.samples = None
+        self.mean = None
         self.acc = None
         self.acc_rate = None
         self.posterior_history = None
@@ -1405,50 +1401,32 @@ class DREAM(Sampling):
         burnin_index = int(self.burnin * N)
         self.samples = np.zeros((N, self.chains, self.dimension))
         self.posterior_history = np.zeros((N + burnin_index, self.chains))
-        self.acc = np.zeros((self.chains, self.num_stages, 2))
+        self.acc = np.zeros(self.chains)
 
         for gen in range(N + burnin_index):
-            #proposal = np.zeros((self.chains, self.dimension))
+            # Propose new points for each chain
             proposal = current.copy()
-            proposal_posterior = np.zeros(self.chains)
-
             for chain in range(self.chains):
-                # Initialize stage_posterior for the current chain
-                stage_posterior = [current_posterior[chain]]
-                proposals = [current[chain]]
+                # Sample crossover probability CR = a / nCR
+                a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_a)
+                CR = a / self.nCR
+                self.h_a[a - 1] += 1  # Count usage of this CR value
 
-                for stage in range(self.num_stages):
-                    if gen >= burnin_index:
-                        self.acc[chain, stage, 0] += 1
-                    # Sample crossover probability CR = a / nCR
-                    a = np.random.choice(np.arange(1, self.nCR + 1), p=self.p_a)
-                    CR = a / self.nCR
-                    self.h_a[a - 1] += 1  # Count usage of this CR value
+                # Proposal generation using differential evolution
+                proposal_chain = self._propose_point(current, chain, gen, CR)
+                proposal_posterior = self.posterior(proposal_chain)
 
-                    # Proposal generation using differential evolution
-                    proposal[chain] = self._propose_point(current, chain, gen, CR, stage)
-                    proposal_posterior[chain] = self.posterior(proposal[chain])
-                    proposals.append(proposal[chain])
-                    stage_posterior.append(proposal_posterior[chain])
+                alpha = min(0, proposal_posterior - current_posterior[chain]) if self.log else min(1, proposal_posterior / current_posterior[chain])
+                u = np.log(np.random.rand()) if self.log else np.random.rand()
+                # Accept the proposal with probability alpha
+                if u < alpha:
+                    proposal[chain] = proposal_chain
+                    current_posterior[chain] = proposal_posterior
+                    self.acc[chain] += 1 if gen >= burnin_index else 0
 
-                    if self.log:
-                        alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
-                        u = np.log(np.random.rand())
-                    else:
-                        alpha = self._acceptance_probability(stage_posterior=stage_posterior, proposals=proposals)
-                        u = np.random.rand()
-                    # Accept the proposal with probability alpha
-                    if u < alpha:
-                        current_posterior[chain] = proposal_posterior[chain]
-                        if gen >= burnin_index:
-                            self.acc[chain, stage, 1] += 1
-
-                        # Calculate the squared jumping distance ∆m
-                        delta_m = np.sum(((proposal[chain] - current[chain]) / np.std(proposal, axis=0)) ** 2)
-                        self.Delta_a[a - 1] += delta_m
-                        break
-                    else:
-                        proposal[chain] = current[chain]
+                    # Calculate the squared jumping distance ∆m
+                    delta_m = np.sum(((proposal[chain] - current[chain]) / np.std(proposal, axis=0)) ** 2)
+                    self.Delta_a[a - 1] += delta_m
 
             current = proposal        
             self.posterior_history[gen] = current_posterior
@@ -1464,112 +1442,315 @@ class DREAM(Sampling):
                 for a in range(self.nCR):
                     self.p_a[a] = (self.Delta_a[a] / self.h_a[a]) / total_Delta if (total_Delta > 0 and self.h_a[a] > 0) else self.p_a[a]
 
-        self.acc_rate = self.acc[:, :, 1] / self.acc[:, :, 0]
+        self.acc_rate = self.acc / N
         self._compute_gelman_rubin()
+        self.samples = self.samples.transpose(1, 0, 2)  # Change shape to (chains, N, dimension)
+        self.mean = np.mean(self.samples, axis=(1, 0))  # Mean of samples across chains
         return self.samples
 
-def compute_acf_nd(series, max_lag=None):
+def compute_autocorrelation_old(samples, max_lag=None):
     """
     Compute the autocorrelation function (ACF) and the autocorrelation length (s_f)
     for an N-dimensional time series by averaging the per-dimension autocorrelations.
     
     Parameters:
-      series (array-like): 2D array of shape (num_samples, d) for a single chain.
+      samples (array-like): 2D array of shape (num_samples, d) for a single chain.
       max_lag (int): Maximum lag to consider (default is min(100, num_samples//2)).
       
     Returns:
       acfs (np.ndarray): 1D array of averaged autocorrelations for lags 1,2,...,max_lag.
       s_f (float): Autocorrelation length computed as 1 + 2 * sum_{lag: acf(lag) > 0} acf(lag).
     """
-    series = np.asarray(series)
-    N, d = series.shape
+
+    N, d = samples.shape
     max_lag = min(1000, N // 2) if max_lag is None else max_lag
-    acfs = []
+    acfs = np.zeros(max_lag)
     for lag in range(1, max_lag + 1):
-        # Compute acf for each dimension at this lag:
-        acfs_dim = [np.corrcoef(series[:-lag, j], series[lag:, j])[0, 1] for j in range(d)]
-        # Average over dimensions:
-        acfs.append(np.mean(acfs_dim))
-    acfs = np.array(acfs)
+        acfs[lag - 1] = np.mean([np.corrcoef(samples[:-lag, j], samples[lag:, j])[0, 1] for j in range(d)])
     s_f = 1 + 2 * np.sum(acfs[acfs > 0])
     return acfs, s_f
 
-def compute_diagnostics(samples, chainwise=-1, max_lag=None):
+def compute_autocorrelation(samples):
     """
-    Computes the overall autocorrelation length (s_f) and effective sample size (ESS)
-    for a set of samples. The autocorrelation is computed by averaging over dimensions.
+    Compute the autocorrelation function (ACF) and the integrated autocorrelation 
+    length (s_f) for multi-chain samples.
     
-    Parameters:.
+    Parameters:
+      samples (np.ndarray): Array of shape (num_chains, N, d) of MCMC samples.
+      
+    Returns:
+      s_f_mean (float): Mean integrated autocorrelation time over dimensions.
+      s_f_max (float): Maximum integrated autocorrelation time over dimensions.
+    """
+    samples=samples[np.newaxis, :, :] if samples.ndim == 2 else samples
+    no_chains, N, d = samples.shape
+
+    # Compute the ACF for each chain and each dimension.
+    acf_list = []
+    for i in range(no_chains):
+        acf_chain = np.empty((N, d))
+        for j in range(d):
+            acf_chain[:, j] = emcee.autocorr.function_1d(samples[i, :, j])
+        acf_list.append(acf_chain)
+    
+    # Determine the maximum length among the computed ACFs
+    lengths = np.array([acf.shape[0] for acf in acf_list])
+    max_length = lengths.max()
+
+    # Create a 3D array (no_chains x max_length x d) and pad with NaN where needed.
+    acf_array = np.full((no_chains, max_length, d), np.nan)
+    for i in range(no_chains):
+        L = lengths[i]
+        acf_array[i, :L, :] = acf_list[i]
+
+    # Compute the mean ACF over chains for each lag and dimension, ignoring NaNs.
+    mean_acf = np.nanmean(acf_array, axis=0)  # shape: (max_length, d)
+
+    # Compute the integrated autocorrelation time for each dimension.
+    s_f_all = np.zeros(d)
+    for j in range(d):
+        s_f_all[j] = autocorr_FM(mean_acf[:, j], c=5)
+
+    s_f_mean = np.mean(s_f_all)
+    s_f_max = np.max(s_f_all)
+
+    return s_f_mean, s_f_max, np.mean(mean_acf[:(2*int(s_f_max)),:], axis=1)
+
+def autocorr_FM(f, c: int = 5):
+    taus = 2.0 * np.cumsum(f) - 1.0
+    m = np.arange(len(taus)) < c * taus
+    if np.any(m):
+        window = np.argmin(m)
+    else:
+        window = len(taus) - 1
+
+    return taus[window]
+
+def compute_gelman_rubin(samples):
+        """
+        Computes the Gelman-Rubin convergence diagnostic R-hat for each dimension.
+        Uses the last 50% of samples in each chain.
+        """
+        samples = np.stack(samples, axis=0) if isinstance(samples, list) else samples
+        chains, N, d = samples.shape
+        N = N // 2
+        samples_half = samples[:, N:, :]
+
+        R_hat = np.zeros(d)
+
+        for j in range(d):
+            # Mean across chains for each sample in dimension j
+            chain_means = np.mean(samples_half[:, :, j], axis=1)  # Shape (num_chains,)
+
+            # Between-chain variance B
+            B = N * np.var(chain_means, ddof=1)
+
+            # Within-chain variance W
+            W = np.mean([np.var(samples_half[chain, :, j], ddof=1) for chain in range(chains)])
+
+            # Gelman-Rubin R-hat for dimension j
+            R_hat[j] = np.sqrt((((N - 1) * W) + B) / (W * N))
+
+        return (np.mean(R_hat), np.max(R_hat))
+
+def normalized_euclidean_distance(samples, true_mean):
+    """
+    Compute the normalized Euclidean distance between the estimated mean 
+    from MCMC samples and the true mean of the target distribution.
+    
+    Parameters:
+        samples (np.ndarray): MCMC samples, shape (num_samples,) for 1D 
+                              or (num_samples, dim) for multi-dimensional.
+        true_mean (float or np.ndarray): The true mean of the target distribution.
     
     Returns:
-      diagnostics (dict): Dictionary with keys "s_f" and "ESS".
+        float: Normalized Euclidean distance.
     """
-    # Normalize input: if 2D, add chain dimension.
-    if samples.ndim == 2:
-            samples = samples[np.newaxis, :, :]
-    elif samples.ndim == 3:
-        samples = np.transpose(samples, (1, 0, 2))
+
+    est_mean = np.mean(samples, axis=0)
+    print(f"Estimated mean: {est_mean}, True mean: {true_mean}")
+
+    euclidean_dist = np.linalg.norm(est_mean - true_mean)
+    norm_factor = np.linalg.norm(true_mean) if np.linalg.norm(true_mean) > 0 else 1.0
+    normalized_dist = euclidean_dist / norm_factor
+
+    return normalized_dist
+
+def compute_function_evaluations(len_samples, sampler):
+
+    if isinstance(sampler, DRAM):
+        function_evaluations = float(np.sum(sampler.acc[:, 0]))
     else:
-        raise ValueError("Samples must be a 2D or 3D array.")
-    
-    num_chains, num_samples, dim = samples.shape
-    samples = samples.reshape(-1, dim) if (chainwise == -1) else samples[chainwise]
+        function_evaluations = float(len_samples)
 
-    acfs, sf = compute_acf_nd(samples, max_lag=max_lag)
-    ess = len(samples) / sf if sf > 0 else np.nan
+    return function_evaluations
 
-    return {"s_f": sf, "ESS": ess}
-
-def benchmark(sampler, runs=10, num_samples=10000, initial=None, ranges=[], compute_kl=False, visualize=False):
+def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], max_lag=None, visualize=False,
+              Acc=True, distance=False, autocorrelation=True, ESS=True, cost=True, R_hat=True, KL=False, old=False):
     """
     Benchmark a given sampling algorithm by running it multiple times, computing diagnostics, and (optionally) visualizing.
     
     Parameters:
+        sampler (Sampling): The sampling algorithm to benchmark.
+        runs (int): Number of runs to perform.
+        num_samples (int): Number of samples per run.
+        initial (np.ndarray): Initial point for the chain.
+        ranges (list): List of ranges for KL divergence calculation.
+        max_lag (int): Maximum lag for autocorrelation calculation.
+        visualize (bool): Whether to visualize the results.
+        Acc (bool): Whether to compute acceptance rates.
+        distance (bool): Whether to compute normalized Euclidean distance.
+        autocorrelation (bool): Whether to compute autocorrelation length and ESS.
+        ESS (bool): Whether to compute effective sample size.
+        R_hat (bool): Whether to compute Gelman-Rubin convergence diagnostic.
+        KL (bool): Whether to compute KL divergence.
     
     Returns:
       pd.DataFrame: DataFrame containing statistics (Run, s_f, ESS) for each run and overall average.
     """
-    import pandas as pd
-    all_stats = []
-    all_samples_runs = []
-    
-    for run in range(runs):
-        samples = sampler.sample(N=num_samples, initial=initial)
-        all_samples_runs.append(samples)
-        diag = compute_diagnostics(samples)
-        stats = {
-            "Run": run + 1,
-            "Autocorrelation Length (s_f)": round(diag["s_f"], 2),
-            "Effective Sample Size (ESS)": round(diag["ESS"], 2)
-        }
-        if compute_kl:
-            kl = sampler.sampling_quality(samples, ranges=ranges)
-            stats["KL Divergence"] = round(kl, 2)
-        all_stats.append(stats)
 
-        # Compute overall averages
-        avg_s_f = np.mean([stat["Autocorrelation Length (s_f)"] for stat in all_stats])
-        avg_ess = np.mean([stat["Effective Sample Size (ESS)"] for stat in all_stats])
-        stats = {
-            "Run": "Average",
-            "Autocorrelation Length (s_f)": round(avg_s_f, 2),
-            "Effective Sample Size (ESS)": round(avg_ess, 2)
-        }
-        if compute_kl:
-            avg_kl = np.mean([stat["KL Divergence"] for stat in all_stats])
-            stats["KL Divergence"] = round(avg_kl, 3)
+    all_samples = []
+    acc_rates = []
+    if isinstance(sampler, DREAM):
+        sampler.chains = chains
+        sampler.sample(N=num_samples, initial=initial)
+        all_samples = [np.asarray(sampler.samples[i,:,:]) for i in range(sampler.chains)]
+        acc_rates = list(sampler.acc_rate)
+    elif isinstance(sampler, MH) or isinstance(sampler, AM) or isinstance(sampler, DRAM):
+        for i in range(chains):
+            samples = sampler.sample(N=num_samples, initial=initial)
+            all_samples.append(samples)
+            if isinstance(sampler, DRAM):
+                acc_rates.append((sum(sampler.acc[:,1])/len(samples)))
+            else:
+                acc_rates.append(sampler.acc_rate)
+    else:
+        raise ValueError("Unknown sampler type.")
+    
+    ESS = True if cost else ESS
+    autocorrelation = True if ESS else autocorrelation
+    
+    all_stats = []
+    total_evaluations = 0.0
+    for i, samples in enumerate(all_samples):
+        stats = {"Chains": f"Chain {i+1}"}
+        if distance and hasattr(sampler, "true_mean"):
+            stats["Distance"] = round(normalized_euclidean_distance(samples=samples, true_mean=sampler.true_mean), 3)
+
+        if autocorrelation:
+            IAT_avg, IAT_max, acfs = compute_autocorrelation(samples=samples)
+            stats["IAT_avg"] = round(IAT_avg, 3)
+            stats["IAT_max"] = round(IAT_max, 3)
+
+        if old:
+            _, old_IAT_avg = compute_autocorrelation_old(samples=samples, max_lag=max_lag)
+            stats["old_IAT_avg"] = round(old_IAT_avg, 3)
+
+        if ESS:
+            stats["ESS"] = len(samples) // IAT_avg if IAT_avg > 0 else np.nan
+
+        if cost:
+            function_evaluations = compute_function_evaluations(len_samples=len(samples), sampler=sampler)
+            total_evaluations += function_evaluations
+            stats["Cost_per_sample"] = round(function_evaluations / len(samples), 3) if len(samples) > 0 else np.inf
+            stats["Cost_per_ESS"] = round(function_evaluations / stats["ESS"], 3) if stats["ESS"] > 0 else np.inf
+
+        if Acc and acc_rates:
+            stats["Acc"] = round(acc_rates[i], 2)
+
+        if R_hat:
+            stats["R_hat_avg"] = np.nan
+            stats["R_hat_max"] = np.nan
+
+        if KL:
+            stats["KL"] = round(sampler.sampling_quality(samples, ranges=ranges), 3)
+
+        all_stats.append(stats)
+        
+    keys = all_stats[0].keys()
+    stats = {"Chains": "Overall"}
+    for key in keys:
+        if key == "Distance":
+            stats[key] = round(normalized_euclidean_distance(samples=np.stack(all_samples, axis=0).reshape(-1, 2), true_mean=sampler.true_mean), 3)
+        elif key == "R_hat_avg":
+            R_hat_avg, R_hat_max = compute_gelman_rubin(all_samples)
+            stats["R_hat_avg"] = round(R_hat_avg, 3)
+            stats["R_hat_max"] = round(R_hat_max, 3)
+        elif key == "IAT_avg":
+            IAT_avg, IAT_max, acfs = compute_autocorrelation(samples=np.stack(all_samples, axis=0))
+            stats["IAT_avg"] = round(IAT_avg, 3)
+            stats["IAT_max"] = round(IAT_max, 3)
+        elif key == "ESS":
+            stats[key] = round((len(samples) * chains) // stats["IAT_avg"], 3) if autocorrelation else np.nan
+        elif key == "Cost_per_sample":
+            stats["Cost_per_sample"] = round(total_evaluations / (len(samples) * chains), 3) if (len(samples) * chains) > 0 else np.inf
+            stats["Cost_per_ESS"] = round(total_evaluations / stats["ESS"], 3) if stats["ESS"] > 0 else np.inf
+        elif key == "KL":
+            stats[key] = round(sampler.sampling_quality(samples=np.stack(all_samples, axis=0), ranges=ranges, visualise=visualize), 3)
+        elif key not in ["Chains", "R_hat_max", "IAT_max", "Cost_per_ESS"]:
+            stats[key] = round(np.mean([stat[key] for stat in all_stats]), 3)
+        
     all_stats.append(stats)
+
     df_stats = pd.DataFrame(all_stats)
     
     if visualize:
-        #samples_run = all_samples_runs[0]
-        fig, axs = plt.subplots(2, 1, figsize=(12, 8))
-        sampler.visualize_samples_trace(visual=sampler.samples, ax=axs[0], show=False)
-        sampler.visualize_samples_acf(visual=sampler.samples, ax=axs[1], show=False)
+        axes = 2 if autocorrelation else 1
+        fig, axs = plt.subplots(axes, 1, figsize=(15, 5*axes))
+        axs = [axs] if axes == 1 else axs
+        sampler.visualize_samples_trace(visual=np.stack(all_samples, axis=0), ax=axs[0], show=False)
+        if autocorrelation:
+            sampler.visualize_samples_acf(visual=None, ax=axs[1], IAT_avg=IAT_avg, IAT_max=IAT_max, acfs=acfs, show=False)
         plt.tight_layout()
         plt.show()
-        if compute_kl:
-            kl = sampler.sampling_quality(sampler.samples, ranges=ranges, visualise=True)
     
-    return df_stats
+    return df_stats, np.stack(all_samples, axis=0)
 
+def benchmark_average(sampler, runs=10, chains=10, num_samples=10000, initial=None, ranges=[], max_lag=None, visualize=False,
+                      Acc=True, distance=False, autocorrelation=True, ESS=True, cost=True, R_hat=True, KL=False, old=False):
+    """
+    Run the benchmark function multiple times and combine the statistics into a single DataFrame.
+
+    Parameters:
+        sampler (Sampling): The sampling algorithm to benchmark.
+        runs (int): Number of runs to perform.
+        chains (int): Number of chains to use.
+        num_samples (int): Number of samples per run.
+        initial (np.ndarray): Initial point for the chain.
+        ranges (list): List of ranges for KL divergence calculation.
+        max_lag (int): Maximum lag for autocorrelation calculation.
+        visualize (bool): Whether to visualize the results (only for the last run).
+        Acc (bool): Whether to compute acceptance rates.
+        distance (bool): Whether to compute normalized Euclidean distance.
+        autocorrelation (bool): Whether to compute autocorrelation length and ESS.
+        ESS (bool): Whether to compute effective sample size.
+        cost (bool): Whether to compute cost metrics.
+        R_hat (bool): Whether to compute Gelman-Rubin convergence diagnostic.
+        KL (bool): Whether to compute KL divergence.
+        old (bool): Whether to compute old autocorrelation metrics.
+
+    Returns:
+        pd.DataFrame: DataFrame containing combined statistics for all runs and an overall average row.
+    """
+    runs_stats = []
+    all_samples = []
+    for run in range(runs):
+        visualize_run = visualize and (run == runs - 1)
+        df_stats, samples = benchmark(sampler, chains=chains, num_samples=num_samples, initial=initial, ranges=ranges, max_lag=max_lag,
+                                    visualize=visualize_run, Acc=Acc, distance=distance, autocorrelation=autocorrelation,
+                                    ESS=ESS, cost=cost, R_hat=R_hat, KL=KL, old=old)
+        all_samples.append(samples)
+        overall_row = df_stats[df_stats["Chains"] == "Overall"].copy()
+        overall_row["Chains"] = f"Run {run + 1}"
+        runs_stats.append(overall_row)
+
+    # Combine all runs into a single DataFrame
+    runs_stats = pd.concat(runs_stats, ignore_index=True)
+    runs_stats.rename(columns={"Chains": "Runs"}, inplace=True)
+
+    # Add an overall row with averages
+    overall_row = runs_stats.iloc[:, 1:].mean(numeric_only=True).to_dict()
+    overall_row["Runs"] = "Average"
+    runs_stats = pd.concat([runs_stats, pd.DataFrame([overall_row])], ignore_index=True)
+
+    return runs_stats, all_samples
