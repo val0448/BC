@@ -1663,7 +1663,7 @@ def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], ma
             stats["R_hat_max"] = np.nan
 
         if KL:
-            stats["KL"] = round(sampler.sampling_quality(samples, ranges=ranges), 3)
+            stats["KL"] = round(sampler.sampling_quality(samples, ranges=ranges), 4)
 
         all_stats.append(stats)
         
@@ -1674,8 +1674,8 @@ def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], ma
             stats[key] = round(normalized_euclidean_distance(samples=np.stack(all_samples, axis=0).reshape(-1, 2), true_mean=sampler.true_mean), 3)
         elif key == "R_hat_avg":
             R_hat_avg, R_hat_max = compute_gelman_rubin(all_samples)
-            stats["R_hat_avg"] = round(R_hat_avg, 3)
-            stats["R_hat_max"] = round(R_hat_max, 3)
+            stats["R_hat_avg"] = round(R_hat_avg, 4)
+            stats["R_hat_max"] = round(R_hat_max, 4)
         elif key == "IAT_avg":
             IAT_avg, IAT_max, acfs = compute_autocorrelation(samples=np.stack(all_samples, axis=0))
             stats["IAT_avg"] = round(IAT_avg, 3)
@@ -1686,7 +1686,7 @@ def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], ma
             stats["Cost_per_sample"] = round(total_evaluations / (len(samples) * chains), 3) if (len(samples) * chains) > 0 else np.inf
             stats["Cost_per_ESS"] = round(total_evaluations / stats["ESS"], 3) if stats["ESS"] > 0 else np.inf
         elif key == "KL":
-            stats[key] = round(sampler.sampling_quality(samples=np.stack(all_samples, axis=0), ranges=ranges, visualise=visualize), 3)
+            stats[key] = round(sampler.sampling_quality(samples=np.stack(all_samples, axis=0), ranges=ranges, visualise=visualize), 4)
         elif key not in ["Chains", "R_hat_max", "IAT_max", "Cost_per_ESS"]:
             stats[key] = round(np.mean([stat[key] for stat in all_stats]), 3)
         
@@ -1732,6 +1732,7 @@ def benchmark_average(sampler, runs=10, chains=10, num_samples=10000, initial=No
     Returns:
         pd.DataFrame: DataFrame containing combined statistics for all runs and an overall average row.
     """
+    chain_stats = []
     runs_stats = []
     all_samples = []
     for run in range(runs):
@@ -1740,6 +1741,7 @@ def benchmark_average(sampler, runs=10, chains=10, num_samples=10000, initial=No
                                     visualize=visualize_run, Acc=Acc, distance=distance, autocorrelation=autocorrelation,
                                     ESS=ESS, cost=cost, R_hat=R_hat, KL=KL, old=old)
         all_samples.append(samples)
+        chain_stats.append(df_stats.copy())
         overall_row = df_stats[df_stats["Chains"] == "Overall"].copy()
         overall_row["Chains"] = f"Run {run + 1}"
         runs_stats.append(overall_row)
@@ -1749,8 +1751,8 @@ def benchmark_average(sampler, runs=10, chains=10, num_samples=10000, initial=No
     runs_stats.rename(columns={"Chains": "Runs"}, inplace=True)
 
     # Add an overall row with averages
-    overall_row = runs_stats.iloc[:, 1:].mean(numeric_only=True).to_dict()
+    overall_row = runs_stats.iloc[:, 1:].mean(numeric_only=True).round(4).to_dict()
     overall_row["Runs"] = "Average"
     runs_stats = pd.concat([runs_stats, pd.DataFrame([overall_row])], ignore_index=True)
 
-    return runs_stats, all_samples
+    return runs_stats, all_samples, chain_stats
