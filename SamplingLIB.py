@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import multivariate_normal
+from scipy.stats import multivariate_normal, chi2
 from scipy.special import logsumexp
 from typing import Callable
 import matplotlib.animation as animation
@@ -10,6 +10,8 @@ import arviz as az
 import pandas as pd
 import seaborn as sns
 import emcee
+import itertools
+
 
 class Sampling:
     """
@@ -135,7 +137,7 @@ class Sampling:
 
         return logsumexp(log_probs + self.weights) if self.log else np.sum(np.dot(self.weights, np.exp(log_probs)))
 
-    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = [], max_points: int = 50, samples=None, vertical=False):
+    def visualize(self, visuals: list = [], grid: tuple = None, ranges: list = [], max_points: int = 50, samples=None, vertical=False, cov=None):
         """
         Visualizes the samples based on their dimensionality, and compares to posterior.
 
@@ -163,7 +165,8 @@ class Sampling:
                        "samples_hist": [samples, self.visualize_samples_hist],
                        "samples_scatter": [samples, self.visualize_samples_scatter],
                        "samples_trace": [samples, self.visualize_samples_trace],
-                       "samples_acf": [samples, self.visualize_samples_acf]}
+                       "samples_acf": [samples, self.visualize_samples_acf],
+                       "covariance": [cov, self.visualize_covariance_2d]}
 
         visuals = ["posterior"] if visuals == [] else visuals
         fig, axes = plt.subplots(len(visuals), 1, figsize=(15, 5*len(visuals))) if vertical else plt.subplots(1, len(visuals), figsize=(5*len(visuals), 5))
@@ -216,6 +219,7 @@ class Sampling:
         # Create an axis if not provided
         fig, ax = (plt.subplots(figsize=(6, 6)) if ax is None else (None, ax))
         ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
 
         if self.dimension == 1:
             # 1D histogram
@@ -225,14 +229,17 @@ class Sampling:
 
         elif self.dimension == 2:
             # 2D histogram
-            ax.hist2d(visual[:, 0], visual[:, 1], bins=grid[2][:2], range=[grid[1][0], grid[1][1]])
+            ax.hist2d(visual[:, 0], visual[:, 1], bins=grid[2][:2], range=[grid[1][0], grid[1][1]], cmap="viridis")
             ax.set_xlabel('$u_1$')
             ax.set_ylabel('$u_2$')
 
         elif self.dimension > 2 and ax == None and show:  # N-dimensional histogram
             # N-dimensional histogram: Use pair plots
             df = pd.DataFrame(visual, columns=[f'$u_{i+1}$' for i in range(self.dimension)])
-            sns.pairplot(df, diag_kind='hist', corner=True, ax=ax)
+            g = sns.pairplot(df, diag_kind='hist', kind='hist', corner=False, plot_kws={'bins': 50, 'cmap': "viridis"}, diag_kws={'bins': 25})
+            for ax in g.axes.flatten():
+                if ax is not None:
+                    ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)  # Enable grid for each subplot
         if show:
             plt.show()
 
@@ -267,23 +274,24 @@ class Sampling:
         # Create an axis if not provided
         fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax)
         ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
         colors = plt.cm.rainbow(np.linspace(0, 1, N_chains))
 
-        if dimension == 1: # 1D scatter plot: Plot samples against their index
+        if dimension == 1: # 1D scatter plot
             if N_chains > 1:
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(range(N_gen), visual[chain, :, 0], '.', color=color, label=f'Chain {chain+1}')
-                ax.legend(loc='upper right')
+                    ax.plot(range(N_gen), visual[chain, :, 0], '.', color=color, label=f'Chain {chain+1}', alpha=0.5)
+                    ax.legend(loc='upper right')
             else:
                 ax.plot(range(N_gen), visual[:, 0], '.', alpha=0.5)
             ax.set_xlabel('Sample Index')
-            ax.set_ylabel('$u_1$')
+            ax.set_ylabel('$u_1$')    
 
         elif dimension == 2: # 2D scatter plot
             if N_chains > 1:
                 for chain, color in zip(range(N_chains), colors):
-                    ax.plot(visual[chain, :, 0], visual[chain, :, 1], '.', color=color, label=f'Chain {chain+1}')
-                ax.legend(loc='upper right')
+                    ax.plot(visual[chain, :, 0], visual[chain, :, 1], '.', color=color, label=f'Chain {chain+1}', alpha=0.5)
+                    ax.legend(loc='upper right')
             else:
                 ax.plot(visual[:, 0], visual[:, 1], '.', alpha=0.5)
             ax.set_xlabel('$u_1$')
@@ -298,7 +306,10 @@ class Sampling:
 
             df = pd.DataFrame(visual, columns=[f'$u_{i+1}$' for i in range(self.dimension)])
             df['Chain'] = chain_labels
-            sns.pairplot(df, hue='Chain', palette='tab10', diag_kind='hist', corner=True)
+            g = sns.pairplot(df, hue='Chain', palette='rainbow', diag_kind='hist', corner=True)
+            for ax in g.axes.flatten():
+                if ax is not None:
+                    ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)  # Enable grid for each subplot
         if show:
             plt.show()
 
@@ -329,6 +340,7 @@ class Sampling:
         grid = self.create_grid(visual=visual, ranges=ranges, max_points=max_points) if (grid is None and self.dimension <= 2) else grid # Create a grid if not provided
         fig, ax = plt.subplots(figsize=(6, 6) if dimension == 1 else (6, 6)) if ax is None else (None, ax) # Create an axis if not provided
         ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
 
         # Evaluate posterior on the grid
         posterior_values = np.exp(np.array([visual(point) for point in grid[0]])) if self.log else np.array([visual(point) for point in grid[0]])
@@ -342,7 +354,9 @@ class Sampling:
         elif dimension == 2:
             posterior_reshaped = posterior_values.reshape((grid[2][0], grid[2][1]))
             ax.imshow(posterior_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
-                                                    grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto')
+                                                    grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto', cmap="viridis")
+            ax.set_xlabel('$u_1$')
+            ax.set_ylabel('$u_2$')
             
         if show:
             plt.show()
@@ -368,14 +382,19 @@ class Sampling:
             raise ValueError("Samples must be a 2D or 3D array.")
         
         num_chains, num_samples, dim = visual.shape
-        colors = plt.cm.tab10(np.linspace(0, 1, dim))
         fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
         visual = visual.reshape(-1, dim) if (chainwise == -1) else visual[chainwise]
         ax.set_title(title) if (chainwise == -1) else ax.set_title(f"Chain {chainwise+1} - {title}")
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
 
         for j in range(dim):
-            ax.plot(visual[:, j], color=colors[j], label=f"Dimension {j+1}")
+            ax.plot(visual[:, j], label=f"Dimension {j+1}")
         
+        # Add vertical lines at every point = chain * num_samples
+        if chainwise == -1:
+            for chain in range(0, num_chains+1):
+                ax.axvline(chain * num_samples, color='black', linestyle='--', linewidth=1, alpha=0.7)
+
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Value")
         ax.legend(loc="upper right")
@@ -401,6 +420,7 @@ class Sampling:
 
         fig, ax = plt.subplots(figsize=(6, 6)) if ax is None else (None, ax)
         ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
 
         if IAT_avg is None or acfs is None or IAT_max is None:
             IAT_avg, IAT_max, acfs = compute_autocorrelation(samples=visual)
@@ -409,8 +429,8 @@ class Sampling:
         ax.plot(np.arange(1, len(acfs) + 1), acfs, color='blue', linewidth=1, label='ACF')
         ax.scatter(np.arange(1, len(acfs) + 1), acfs, color='blue', s=10)  # Add dots at each point
         ax.axhline(0, color='red', linestyle='--', linewidth=1)
-        ax.axvline(IAT_avg, color='black', linestyle=':', linewidth=1, label=f"IAT_avg = {IAT_avg:.2f}")
-        ax.axvline(IAT_max, color='black', linestyle=':', linewidth=1, label=f"IAT_max = {IAT_max:.2f}")
+        ax.axvline(IAT_avg, color='black', linestyle=':', linewidth=2, label=f"IAT_avg = {IAT_avg:.2f}")
+        ax.axvline(IAT_max, color='black', linestyle=':', linewidth=2, label=f"IAT_max = {IAT_max:.2f}")
         ax.set_xlabel("Lag")
         ax.set_ylabel("ACF")
         ax.legend(loc="upper right")
@@ -439,6 +459,7 @@ class Sampling:
         # Create an axis if not provided
         fig, ax = plt.subplots(figsize=(6, 6) if self.dimension == 1 else (6, 6)) if ax is None else (None, ax)
         ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
 
         if self.dimension == 1:
             # 1D Case: Plot KDE approximation as a line plot
@@ -450,7 +471,7 @@ class Sampling:
             # 2D Case: Use imshow for KDE approximation heatmap
             kde_approximation_reshaped = visual.reshape((grid[2][0], grid[2][1]))
             ax.imshow(kde_approximation_reshaped.T, extent=[grid[0][:, 0].min(), grid[0][:, 0].max(),
-                                                            grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto')
+                                                            grid[0][:, 1].min(), grid[0][:, 1].max()], origin='lower', aspect='auto', cmap="viridis")
 
         else:
             # N-dimensional Case: Use pair plots
@@ -466,6 +487,107 @@ class Sampling:
                         ax[i, j].set_xlabel(f'$u_{i+1}$')
                         ax[i, j].set_ylabel(f'$u_{j+1}$')
         plt.tight_layout()
+        if show:
+            plt.show()
+
+    def visualize_covariance_2d(self, visual, grid=None, title="Proposal distribution", ax=None, ranges=[], center=None, confidence_levels=[], show=True):
+        """
+        Visualizes the covariance contours over the posterior distribution.
+
+        Parameters:
+        - visual (Callable): The posterior function to visualize.
+        - grid (tuple): Grid for posterior visualization (default is None).
+        - title (str): Title for the plot (default is "Covariance").
+        - ax (matplotlib.axes.Axes): Axis to plot on (default is None).
+        - show (bool): If True, displays the plot (default is True).
+
+        Returns:
+        - None
+        """
+        if self.dimension != 2:
+            raise ValueError("Covariance visualization is only supported for 2D cases.")
+        elif visual is None:
+            raise ValueError("Covariance must be provided for covariance visualization.")
+
+        # Define the mean and covariance matrix
+        mean = self.mean if (center is None and hasattr(self, "mean")) else (center if center is not None else np.zeros(self.dimension))
+        cov = visual
+
+        # Calculate eigenvalues and eigenvectors
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        order = eigenvalues.argsort()[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
+        angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+        
+        # Calculate ellipse parameters for largest confidence interval (95%)
+        chi2_95 = chi2.ppf(0.95, df=2)
+        width_95 = 2 * np.sqrt(chi2_95 * eigenvalues[0])
+        height_95 = 2 * np.sqrt(chi2_95 * eigenvalues[1])
+        
+        # Calculate ellipse vertices coordinates
+        ellipse = plt.matplotlib.patches.Ellipse(mean, width_95, height_95, angle=angle)
+
+        # Get the extents of the ellipse
+        verts = ellipse.get_verts()
+        x_min_ellipse, x_max_ellipse = verts[:, 0].min(), verts[:, 0].max()
+        y_min_ellipse, y_max_ellipse = verts[:, 1].min(), verts[:, 1].max()
+        
+        # Add margin to the extents
+        x_span = x_max_ellipse - x_min_ellipse
+        y_span = y_max_ellipse - y_min_ellipse
+        x_min = x_min_ellipse - 0.1 * x_span
+        x_max = x_max_ellipse + 0.1 * x_span
+        y_min = y_min_ellipse - 0.1 * y_span
+        y_max = y_max_ellipse + 0.1 * y_span
+        
+        # Combine with user-specified ranges if any
+        if ranges:
+            x_min = min(x_min, ranges[0][0]) if ranges[0] else x_min
+            x_max = max(x_max, ranges[0][1]) if ranges[0] else x_max
+            y_min = min(y_min, ranges[1][0]) if len(ranges) > 1 else y_min
+            y_max = max(y_max, ranges[1][1]) if len(ranges) > 1 else y_max
+        
+        # Create new ranges array
+        new_ranges = [(x_min, x_max), (y_min, y_max)]
+        
+        # Create grid with adjusted ranges
+        grid = self.create_grid(ranges=new_ranges) if grid is None else grid
+        
+        # Rest of the visualization code (same as before)
+        fig, ax = plt.subplots(figsize=(5, 5)) if ax is None else (None, ax)
+        self.visualize_posterior(visual=self.posterior, grid=grid, ax=ax, show=False)
+        ax.set_title(title)
+        ax.grid(True, color='gray', linestyle='solid', linewidth=0.8, alpha=0.8)
+
+        # # Reshape the grid for contour plotting
+        # x = grid[0][:, 0].reshape(grid[2][0], grid[2][1])
+        # y = grid[0][:, 1].reshape(grid[2][0], grid[2][1])
+        # pos = np.dstack((x, y))
+
+        # # Compute the probability density function
+        # rv = multivariate_normal(mean, visual)
+        # z = rv.pdf(pos)
+
+        # # Plot the contours
+        # ax.contour(x, y, z, levels=3, colors='red')
+
+        # Chi-squared quantiles for 2 degrees of freedom (2D)
+        confidence_levels = [0.35, 0.65, 0.85, 0.95] if confidence_levels == [] else confidence_levels
+        chi2_quantiles = [chi2.ppf(level, df=2) for level in confidence_levels]
+
+        # Plot ellipses for confidence levels
+        for quantile in chi2_quantiles:
+            # Scale eigenvalues by sqrt(quantile) to get radii
+            width = 2 * np.sqrt(quantile * eigenvalues[0])
+            height = 2 * np.sqrt(quantile * eigenvalues[1])
+            ellipse = plt.matplotlib.patches.Ellipse(mean, width, height, angle=angle, edgecolor='red', facecolor='none', linestyle='solid', linewidth=1,)
+            ax.add_patch(ellipse)
+
+        ax.scatter(mean[0], mean[1], c='red', s=50, marker='x')
+        ax.set_xlabel("$u_1$")
+        ax.set_ylabel("$u_2$")
+
         if show:
             plt.show()
 
@@ -508,7 +630,7 @@ class Sampling:
         elif isinstance(visual, np.ndarray):
             # Check if samples come from multiple chains
             if visual.ndim == 3:
-                visual = visual.transpose(1, 0, 2).reshape(-1, self.dimension)
+                visual = visual.reshape(-1, self.dimension)
             elif visual.ndim > 3:
                 raise ValueError("Samples array must be 2D or 3D")
 
@@ -687,40 +809,6 @@ class Sampling:
 
         # Return KL Divergence value
         return kl_divergence
-    
-    def optimize(self, method: str = None, parametrs: list = [], parametr: str = None, range: tuple = None, metric: str = 'time'):
-        # this function will find the most optimal value for a given parametr, according to the chosen metric
-        parametr_values = np.linsapce(range[0], range[1], 100)
-        results = []
-
-        if metric == 'time':
-            pass
-
-        for par in parametr_values:
-            # time start
-            samples = self.method(parametrs, parametr = par)
-            # time end
-            results.append()
-
-        # plot parametr values against results
-
-        return np.min(results)
-
-    def compare(self, methods_dic: dict = {}, metric: str = None):
-        # this function will just be used to call benchmark on all methods and then merge the result data intonice and comprehensive form
-        tables = []
-        plots = []
-
-        for method, parameters in methods_dic:
-            tmp = self.benchmark(self, method, parameters, metric)
-            tables.append(tmp[0])
-            plots.append(tmp[1])
-
-        # merge tables
-
-        # merge and show plots
-
-        return tables
 
 class MH(Sampling):
     """
@@ -746,7 +834,7 @@ class MH(Sampling):
 
     def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2):
         """
-        Initialize the Random Walk Metropolis algorithm.
+        Initialize the Random Walk Metropolis Hastings algorithm.
 
         Parameters:
         - distribution (Sampling): Sampling object with the target distribution.
@@ -764,7 +852,7 @@ class MH(Sampling):
         self.mean = np.zeros(self.dimension)
         self.burnin = burnin
         self.prop_dist = multivariate_normal # Proposal distribution
-        self.C = self.scale_factor * np.eye(self.dimension) if initial_cov is None else initial_cov
+        self.C = self.scale_factor * np.eye(self.dimension) if initial_cov is None else self.scale_factor * initial_cov
         self.acc_rate = None
         self.samples = None
 
@@ -795,7 +883,7 @@ class MH(Sampling):
 
         return np.array(initial)
     
-    def reset(self):
+    def _reset(self):
         """
         Reset the sampler to its initial state.
         """
@@ -816,6 +904,7 @@ class MH(Sampling):
         - None
         """
 
+        self._reset()  # Reset the sampler state
         current = self._initial_sample() if initial is None else initial
         acc = 0
         current_posterior = self.posterior(current)
@@ -856,7 +945,7 @@ class AM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, t0=1000, burnin=0.2, eps=1e-5, update_step=1):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, t0=0.01, burnin=0.2, eps=1e-5, update_step=1):
         """
         Initialize the Adaptive Metropolis algorithm.
 
@@ -874,7 +963,7 @@ class AM(Sampling):
         self.burnin = burnin
         self.update_step = update_step
         self.prop_dist = multivariate_normal
-        self.C0 = initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
+        self.C0 = self.scale_factor * initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
         self.C = None
         self.acc_rate = None
         self.samples = None
@@ -940,9 +1029,10 @@ class AM(Sampling):
         burnin_index = int(self.burnin * N)
         self.samples = np.zeros((N + burnin_index, self.dimension))
         self.samples[0, :] = current
-        self.C = np.zeros((N + burnin_index + 1, self.dimension, self.dimension))
+        self.C = np.zeros((N + burnin_index, self.dimension, self.dimension))
         self.C[0,:,:] = self.C0
         acc = 0
+        t0 = int(self.t0 * N) if self.t0 > 0 else 1
 
         # Reset running statistics
         self.mean = current.copy()
@@ -967,7 +1057,7 @@ class AM(Sampling):
             self.mean += delta / (t + 1)
             self.outer += np.outer(delta, current - self.mean)
 
-            if t <= self.t0:
+            if t <= t0:
                 self.C[t] = self.C[t-1]
             else:
                 self.C[t] = ((self.scale_factor / t) * self.outer) + (self.eps * np.eye(self.dimension))
@@ -991,7 +1081,7 @@ class DRAM(Sampling):
     ```
     """
 
-    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2, t0=100, eps=1e-5, update_step=1, gammas=None, num_stages=3):
+    def __init__(self, distribution, initial_cov=None, scale_factor=None, burnin=0.2, t0=0.01, eps=1e-5, update_step=1, gammas=None, num_stages=3):
         """
         DRAM initialization.
         
@@ -1010,7 +1100,7 @@ class DRAM(Sampling):
         self.update_step = update_step  # Update covariance matrix every n samples
         self.gammas = [1.0] + [0.5**i for i in range(1, num_stages)] if gammas is None else gammas
         self.prop_dist = multivariate_normal # Proposal distribution
-        self.C0 = initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
+        self.C0 = self.scale_factor * initial_cov if initial_cov is not None else self.scale_factor * np.eye(self.dimension)
         self.C = None
         self.acc = None  # Count of accepted samples
         self.acc_rate = None  # Acceptance rate of the samples
@@ -1132,14 +1222,15 @@ class DRAM(Sampling):
         self.samples = np.zeros((N + burnin_index, self.dimension))
         self.samples[0, :] = current
         self.acc = np.zeros((self.num_stages, 2))
-        self.C = np.zeros((N + burnin_index + 1, self.dimension, self.dimension))
+        self.C = np.zeros((N + burnin_index, self.dimension, self.dimension))
         self.C[0,:,:] = self.C0
+        t0 = int(self.t0 * N) if self.t0 > 0 else 1
 
         # Reset running statistics
         self.mean = current.copy()
         self.outer[:] = 0
 
-        for t in range(N + burnin_index):
+        for t in range(1, N + burnin_index):
             stage_posterior = [current_posterior]
             proposals = [current]
             for stage in range(self.num_stages):
@@ -1171,7 +1262,7 @@ class DRAM(Sampling):
             self.mean += delta / (t + 1)
             self.outer += np.outer(delta, current - self.mean)
 
-            if t <= self.t0:
+            if t <= t0:
                 self.C[t] = self.C[t-1]
             else:
                 self.C[t] = ((self.scale_factor / t) * self.outer) + (self.eps * np.eye(self.dimension))
@@ -1287,7 +1378,7 @@ class DREAM(Sampling):
         randomized_dimensions = np.random.permutation(self.dimension)
 
         for i in randomized_dimensions:
-            if np.random.rand() < CR:
+            if np.random.rand() <= CR:
                 if gen % 5 == 0:
                     beta = 1.0
                 else:
@@ -1592,21 +1683,24 @@ def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], ma
     
     Parameters:
         sampler (Sampling): The sampling algorithm to benchmark.
-        runs (int): Number of runs to perform.
-        num_samples (int): Number of samples per run.
+        chains (int): Number of chains to run.
+        num_samples (int): Number of samples to generate per chain.
         initial (np.ndarray): Initial point for the chain.
-        ranges (list): List of ranges for KL divergence calculation.
-        max_lag (int): Maximum lag for autocorrelation calculation.
-        visualize (bool): Whether to visualize the results.
+        ranges (list): Ranges for the sampling algorithm.
+        max_lag (int): Maximum lag for autocorrelation computation.
+        visualize (bool): Whether to visualize the samples and diagnostics.
         Acc (bool): Whether to compute acceptance rates.
-        distance (bool): Whether to compute normalized Euclidean distance.
-        autocorrelation (bool): Whether to compute autocorrelation length and ESS.
+        distance (bool): Whether to compute the distance from the true mean.
+        autocorrelation (bool): Whether to compute autocorrelation statistics.
         ESS (bool): Whether to compute effective sample size.
-        R_hat (bool): Whether to compute Gelman-Rubin convergence diagnostic.
+        cost (bool): Whether to compute cost statistics.
+        R_hat (bool): Whether to compute R-hat statistics.
         KL (bool): Whether to compute KL divergence.
+        old (bool): Whether to use the old autocorrelation method.
     
     Returns:
-      pd.DataFrame: DataFrame containing statistics (Run, s_f, ESS) for each run and overall average.
+        df_stats (pd.DataFrame): DataFrame containing the computed statistics.
+        all_samples (np.ndarray): Array of all samples generated by the sampler.
     """
 
     all_samples = []
@@ -1691,7 +1785,6 @@ def benchmark(sampler, chains=10, num_samples=10000, initial=None, ranges=[], ma
             stats[key] = round(np.mean([stat[key] for stat in all_stats]), 3)
         
     all_stats.append(stats)
-
     df_stats = pd.DataFrame(all_stats)
     
     if visualize:
@@ -1756,3 +1849,50 @@ def benchmark_average(sampler, runs=10, chains=10, num_samples=10000, initial=No
     runs_stats = pd.concat([runs_stats, pd.DataFrame([overall_row])], ignore_index=True)
 
     return runs_stats, all_samples, chain_stats
+
+def benchmark_parametrs(sampler, param_dict, benchmark_inputs):
+    """
+    Benchmark different settings of sampler-specific parameters.
+
+    Parameters:
+        sampler (Sampling): The sampling algorithm to benchmark.
+        param_dict (dict): Dictionary of parameter names and their list of values to try.
+        benchmark_inputs (dict): Dictionary of inputs for the "benchmark_average" function.
+
+    Returns:
+        pd.DataFrame: DataFrame containing benchmark results for each parameter combination.
+    """
+
+    # Validate that all keys in param_dict are attributes of the sampler
+    invalid_keys = [key for key in param_dict if not hasattr(sampler, key)]
+    if invalid_keys:
+        raise ValueError(f"The sampler does not have the following attributes: {invalid_keys}")
+    
+    results = []
+
+    # Generate all combinations of parameter values
+    param_names = list(param_dict.keys())
+    param_values = list(itertools.product(*param_dict.values()))
+
+    for values in param_values:
+        # Set the parameters for the sampler
+        for name, value in zip(param_names, values):
+            if value is not None:
+                setattr(sampler, name, value)
+
+        # Run the benchmark
+        runs_stats, _, _ = benchmark_average(sampler, **benchmark_inputs)
+
+        # Extract the last row (average row) and remove the "Runs" column
+        avg_row = runs_stats.iloc[-1].drop("Runs").to_dict()
+
+        # Add parameter values to the row
+        for name, value in zip(param_names, values):
+            avg_row[name] = value
+
+        # Append the row to the results
+        results.append(avg_row)
+
+    # Create a DataFrame from the results
+    columns = param_names + list(runs_stats.columns[1:])
+    return pd.DataFrame(results, columns=columns)
